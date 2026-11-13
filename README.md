@@ -51,27 +51,47 @@ POST /api/solve는 현재 winner, final_answer, scores, process 필드를 반환
 - **Frontend:** React, Tailwind CSS, MathJax
 - **현재 저장:** 프로젝트 점수용 로컬 JSON 파일
 
-## 고도화 계획
+## MVP 고도화: MCP와 Kubernetes
 
-### MVP: Agent 실행과 도구 사용
+이번 MVP의 중심은 MCP 도구 연동과 Kubernetes 운영입니다. 기존 Flask 문제 풀이 서비스를 컨테이너화하고, MCP 도구 서버와 연결해 로컬 Kubernetes 환경에 배포하는 end-to-end 흐름을 만듭니다. 현재 이 항목들은 계획 단계이며 구현 완료 기능이 아닙니다.
 
-1. 기존 Flask 구조와 API를 유지하면서 Agent 실행 로직을 분리합니다.
-2. 실행 단위 상태와 단계 이벤트, 종료 사유를 명시적으로 관리합니다.
-3. function calling으로 제한된 계산기 도구를 연결하고, 도구명·인자·호출 횟수를 서버에서 검증합니다.
-4. Solver와 Verifier의 구조화된 출력 및 프롬프트 버전을 기록합니다.
-5. 고정 시나리오 하네스로 완료율, 합의율, 도구 호출 수, 오류율, 지연 시간, 토큰/비용을 측정합니다.
-6. 실행 ID가 포함된 로그로 단계별 실패를 찾을 수 있도록 합니다.
+### 목표 구조
 
-### 후속 단계
+    사용자
+      → Flask GemPT API
+      → LLM의 도구 호출 판단
+      → MCP Client
+      → MCP Server (계산 도구)
+      → 도구 결과를 LLM 검증 흐름에 반영
+      → 답변과 실행 이벤트 반환
 
-- 도구 인터페이스가 안정된 뒤 계산 도구를 MCP 서버로 제공
-- OpenTelemetry 호환 추적과 Langfuse 또는 Phoenix 중 하나를 연결
-- Dockerfile과 Docker Compose로 재현 가능한 실행 환경 구성
-- GitHub Actions로 의존성 설치, 정적 검사, 테스트, 이미지 빌드 자동화
-- 로컬 Kubernetes에서 Deployment, Service, probe, Secret/ConfigMap, 파드 로그 확인
+Flask 애플리케이션은 MCP Client 역할을 합니다. LLM이 계산 도구 호출을 요청하면 서버가 허용된 도구와 입력을 확인하고 MCP Server에 전달합니다. LLM이 MCP 서버에 직접 연결되는 구조는 아닙니다.
 
-MCP, 분산 실행, 장기 사용자 기억, Docker/Kubernetes 배포, GitHub Actions는 현재 구현된 기능이 아닙니다. 평가 기준과 기준선 측정 결과를 확인한 뒤 단계별로 진행합니다.
+### 2일 MVP 범위
 
+1. **MCP 도구:** 별도 MCP Server에 제한된 산술 계산 도구 한 개를 구현하고, Flask 앱에서 MCP Client로 검색·호출합니다.
+2. **안전한 호출:** 도구 허용 목록, 인자 스키마, 식 복잡도, 호출 시간·횟수를 제한하고 성공·실패 결과를 기록합니다.
+3. **컨테이너 실행:** Flask API와 MCP Server를 별도 이미지로 만들고 Docker Compose로 함께 실행합니다.
+4. **Kubernetes 배포:** 로컬 클러스터에 API와 MCP Server를 각각 Deployment와 Service로 배포합니다. Secret/ConfigMap, readiness/liveness probe, 파드 로그 확인 절차를 포함합니다.
+5. **동작 시연:** 한 문제 요청에서 LLM 도구 호출 → MCP Server 실행 → 결과 반영 → 최종 응답까지 확인합니다. 실행 단계와 종료 사유를 로그에서 식별할 수 있게 합니다.
+6. **기존 호환성:** 현재 /api/solve 응답 필드를 유지하고, 기존 이미지 풀이·토론 동작이 계속 가능한 방법을 문서화합니다.
+
+현재 점수 파일이 로컬 JSON이므로 MVP에서는 API 파드 한 개로 실행하고 데이터 파일 보존 방식을 명시합니다. 여러 API 파드로 확장하거나 운영 수준의 가용성을 주장하지 않습니다.
+
+### 2일 작업 순서
+
+- **1일차:** 인터페이스 확정, MCP Server와 계산 도구 구현, Flask MCP Client 연결, Docker Compose에서 두 서비스 실행
+- **2일차:** Kubernetes 매니페스트 작성, 로컬 클러스터 배포, 서비스 연결·헬스 상태·로그 확인, 전체 시연과 문서 정리
+
+### MVP 이후 확장
+
+- Agent 실행 상태와 대화별 지속 저장
+- 평가 하네스와 프롬프트·도구 설명 버전 비교
+- OpenTelemetry 기반 trace와 Langfuse 또는 Phoenix 시각화
+- 여러 MCP 도구, LangGraph 등 Agent 프레임워크 평가
+- GitHub Actions에서 품질 검사와 컨테이너 빌드 자동화
+
+MCP Server, Kubernetes, Docker Compose, 실행 상태·평가 하네스는 현재 구현된 기능이 아닙니다. 구현 후 동작과 측정 결과를 확인해 상태를 갱신합니다.
 ## 로컬 실행
 
 ### 준비물
