@@ -1,116 +1,125 @@
-# GemPT: AI 기반 교차 검증 시스템
+# GemPT-AI-Lab
 
-AI 모델 간 지능형 토론을 통해 문제 해결의 신뢰도를 극대화하는 웹 애플리케이션
+듀얼 LLM 기반 문제 풀이 검증 서비스 GemPT를 출발점으로, Agent 실행 흐름과 도구 사용, 평가 방법을 단계적으로 실험하는 프로젝트입니다.
 
-## 1. 프로젝트 개요
+> **현재 상태:** 저장소에는 기존 GemPT 기능이 구현되어 있습니다. Agent 고도화 항목은 계획이며, 아래에서 구현 상태와 계획을 구분해 설명합니다.
 
-**GemPT는 AI 시대에 정보의 홍수 속에서 AI 답변의 신뢰성의 부족이라는 핵심 문제에 주목했습니다. 청년들이 학습 및 경력 개발 과정에서 복잡한 문제를 해결할 때, 단순히 AI의 답변에 의존하는 것을 넘어 그 답변이 얼마나 정확하고 신뢰할 수 있는지 검증하는 것이 필수적입니다.**
+## 프로젝트 소개
 
-저희 GemPT는 이러한 문제를 해결하기 위해 OpenAI의 GPT 모델을 '문제 해결사(Solver)'로, Google의 Gemini 모델을 '검증자(Verifier)'로 활용하는 **듀얼 AI 토론 시스템**을 구축했습니다. AI 스스로 자신의 답변을 검증하고, 나아가 서로 토론하여 최종 답변의 정확도를 높이는 방식입니다.
+생성형 AI의 답변이 서로 다르거나 틀릴 때 학습자가 판단 근거를 확인하기 어렵다는 문제에서 시작했습니다. 기존 GemPT는 GPT를 문제 해결사(Solver), Gemini를 검증자(Verifier)로 나누고, 이미지 속 문제를 분석해 답안을 교차 검증합니다.
 
-특히, 청년 취업 및 경력 성장을 지원하는 플랫폼으로서, GemPT는 다음과 같은 가치를 제공합니다:
-*   **신뢰성 높은 지식 제공:** 검증된 AI 답변을 통해 잘못된 정보 습득을 방지하고 효과적인 학습을 지원합니다.
-*   **문제 해결 능력 향상:** AI의 투명한 토론 과정을 통해 사용자가 문제 해결의 논리적 흐름을 이해하고 학습하는 데 기여합니다.
-*   **기술적 한계 극복:** AI의 이미지 인식 및 언어적 한계를 극복하기 위한 다양한 로직을 통합하여 최적의 솔루션을 제공합니다.
+GemPT-AI-Lab의 고도화 방향은 기존 문제 풀이 흐름에 Agent 상태 관리, 제한된 도구 호출, 재현 가능한 평가 하네스를 더하는 것입니다. 목표는 정답을 보장한다고 주장하는 것이 아니라, 실행 단계와 도구 결과, 실패 원인을 확인하고 개선할 수 있는 구조를 만드는 것입니다.
 
-## 2. 주요 기능
+## 현재 구현된 기능
 
-*   **이미지 기반 문제 제출 및 AI 해결:**
-    *   수학 문제, 다이어그램 등 이미지 형태의 문제를 업로드하여 AI에 질문합니다.
-    *   AI가 이미지 내용을 분석하고 문제 해결을 시도합니다.
-*   **듀얼 AI (GPT & Gemini) 교차 검증 및 토론 루프:**
-    *   GPT가 제시한 초기 해결책을 Gemini가 '감사관'으로서 엄격하게 검증합니다.
-    *   오류 발견 시, GPT와 Gemini는 최대 5라운드까지 '토론'을 진행하며 상호 비판 및 자기 수정을 통해 최종 답변의 정확도를 높입니다.
-*   **AI 신뢰도 점수 시스템:**
-    *   각 AI 모델의 토론 과정에서의 성능(오류 인정, 성공적인 반박 등)에 따라 신뢰도 점수가 동적으로 부여됩니다.
-    *   이 점수는 프로젝트별로 관리되며, AI들이 의견 불일치 상황에 놓일 때 어느 모델의 의견을 더 신뢰해야 할지 판단하는 중요한 지표로 활용됩니다.
-*   **이미지 과목 인식 및 사전 정보 크롤링:**
-    *   제출된 문제 이미지의 과목(예: 공학 선형대수학)을 AI가 먼저 인식합니다.
-    *   인식된 과목을 기반으로 Google Search API (SerpAPI)를 활용하여 문제 해결에 필요한 사전 정보(수식, 기호, 기본 정리 등)를 자동으로 크롤링하여 GPT에게 제공함으로써, AI의 답변 정확도를 비약적으로 향상시킵니다.
-*   **한국어 번역 AI 로직:**
-    *   사용자의 **한국어 질문을 영어로 번역하여 AI에게 전달**(프롬프트 엔지니어링을 위해)하고, 영어 기반의 지식 검색 및 답변 생성을 수행합니다.
-    *   생성된 답변을 최종적으로 **한국어로 다시 번역하여 사용자에게 제공**함으로써, AI 모델의 언어적 강점(영어가 더 정확한 답변을 낼 때가 많음)을 활용하여 최적의 답변을 도출합니다.
-*   **상세 토론 과정 로그 제공:**
-    *   AI들이 문제를 해결하고 검증하며 토론하는 모든 과정을 상세한 로그로 기록하여 사용자에게 투명하게 공개하고, AI의 추론 과정을 이해할 수 있도록 돕습니다.
-*   **프로젝트별 관리:**
-    *   각 사용자가 여러 문제 해결 세션을 프로젝트 단위로 관리할 수 있으며, 각 프로젝트의 토론 이력 및 신뢰도 점수가 개별적으로 유지됩니다.
+- 문제 이미지를 업로드하고 질문과 함께 풀이를 요청합니다.
+- Gemini가 이미지의 과목을 분류하고 검색 질의를 생성합니다.
+- SerpAPI 검색 결과를 바탕으로 배경 지식 패키지를 생성합니다.
+- GPT-4o가 초기 풀이를 만들고 Gemini 2.5 Pro가 검증합니다.
+- 의견이 다르면 최대 5회까지 반박·수정 과정을 진행합니다.
+- 최종 답변, 모델 점수, 단계별 처리 내용을 응답으로 반환합니다.
+- 프로젝트별 GPT·Gemini 점수를 로컬 JSON 파일에 저장합니다.
 
-## 3. 기술 스택
+현재 검색은 Agent가 선택하는 도구 호출이 아니라 고정된 처리 단계입니다. 실행은 Flask 요청 안에서 동기적으로 진행되며, 실행 상태 조회나 재개 API는 없습니다.
 
-*   **프론트엔드 (Frontend):**
-    *   HTML5, CSS3 (Tailwind CSS)
-    *   JavaScript (React - CDN 기반 임베딩)
-    *   MathJax (LaTeX 수식 렌더링 라이브러리)
-*   **백엔드 (Backend):**
-    *   Python 3.13 (Flask 웹 프레임워크)
-    *   OpenAI Python Client (GPT-5.1 연동)
-    *   Google Generative AI Python Client (Gemini 2.5 Pro 연동)
-    *   SerpAPI Python Client (Google Search API 연동)
-    *   `dotenv` (환경 변수 관리)
-    *   `Pillow` (PIL - 이미지 처리)
-    *   `Flask` (웹 서버 및 API 제공)
-*   **외부 API (External APIs):**
-    *   OpenAI API (GPT-4o)
-    *   Google Gemini API (Gemini 2.5 Pro)
-    *   SerpAPI (Google Search API)
+## 현재 처리 흐름
 
-## 4. 설치 및 실행 방법
+    문제 이미지와 질문
+      → Flask POST /api/solve
+      → Gemini 과목 분류 및 검색 질의 생성
+      → SerpAPI 검색, Gemini 지식 패키지 구성
+      → GPT-4o 초기 풀이
+      → Gemini 2.5 Pro 검증
+      → 최대 5회 토론 및 프로젝트 점수 갱신
+      → 답변, 점수, 단계별 process 반환
 
-이 프로젝트를 로컬 환경에서 설정하고 실행하기 위한 지침입니다.
+## API
 
-### 4.1. 사전 준비
+| Method | Endpoint | 설명 |
+| --- | --- | --- |
+| GET | / | 웹 애플리케이션 제공 |
+| POST | /api/solve | multipart/form-data로 image, 선택 질문 question, 선택 project_id를 받아 풀이 |
+| GET | /api/scores/{project_id} | 프로젝트별 모델 점수 조회 |
 
-*   **Python 3.8 이상** 설치
-*   활성 인터넷 연결
-*   OpenAI API 키, Google Gemini API 키, SerpAPI 키 발급
+POST /api/solve는 현재 winner, final_answer, scores, process 필드를 반환합니다. 자세한 계약은 [기존 API 명세서](docs/api_spec.md)를 참고하세요.
 
-### 4.2. 프로젝트 설정
+## 기술 스택
 
-1.  **리포지토리 클론:**
-    ```bash
-    git clone https://github.com/2025-X-Thon-Team2/2025-X-Thon-Team2_kongjjagkongjjagdugeundugeun.git
-    cd 2025-X-Thon-Team2_kongjjagkongjjagdugeundugeun
-    ```
-2.  **백엔드 디렉토리로 이동:**
-    ```bash
-    cd backend
-    ```
-3.  **Python 가상 환경 생성 및 활성화:**
-    *   Windows (PowerShell):
-        ```powershell
-        python -m venv venv
-        .\venv\Scripts\Activate.ps1
-        ```
-    *   macOS/Linux:
-        ```bash
-        python3 -m venv venv
-        source venv/bin/activate
-        ```
-4.  **필요한 Python 의존성 설치:**
-    ```bash
+- **Backend:** Python, Flask, Pillow
+- **LLM:** OpenAI API (GPT-4o), Google Gemini API (Gemini 2.5 Pro)
+- **검색:** SerpAPI
+- **Frontend:** React, Tailwind CSS, MathJax
+- **현재 저장:** 프로젝트 점수용 로컬 JSON 파일
+
+## 고도화 계획
+
+### MVP: Agent 실행과 도구 사용
+
+1. 기존 Flask 구조와 API를 유지하면서 Agent 실행 로직을 분리합니다.
+2. 실행 단위 상태와 단계 이벤트, 종료 사유를 명시적으로 관리합니다.
+3. function calling으로 제한된 계산기 도구를 연결하고, 도구명·인자·호출 횟수를 서버에서 검증합니다.
+4. Solver와 Verifier의 구조화된 출력 및 프롬프트 버전을 기록합니다.
+5. 고정 시나리오 하네스로 완료율, 합의율, 도구 호출 수, 오류율, 지연 시간, 토큰/비용을 측정합니다.
+6. 실행 ID가 포함된 로그로 단계별 실패를 찾을 수 있도록 합니다.
+
+### 후속 단계
+
+- 도구 인터페이스가 안정된 뒤 계산 도구를 MCP 서버로 제공
+- OpenTelemetry 호환 추적과 Langfuse 또는 Phoenix 중 하나를 연결
+- Dockerfile과 Docker Compose로 재현 가능한 실행 환경 구성
+- GitHub Actions로 의존성 설치, 정적 검사, 테스트, 이미지 빌드 자동화
+- 로컬 Kubernetes에서 Deployment, Service, probe, Secret/ConfigMap, 파드 로그 확인
+
+MCP, 분산 실행, 장기 사용자 기억, Docker/Kubernetes 배포, GitHub Actions는 현재 구현된 기능이 아닙니다. 평가 기준과 기준선 측정 결과를 확인한 뒤 단계별로 진행합니다.
+
+## 로컬 실행
+
+### 준비물
+
+- Python 가상환경
+- OpenAI API 키와 Google Gemini API 키
+- 검색 기능을 사용할 경우 SerpAPI 키
+
+### 설치
+
+    git clone https://github.com/sophie-24/GemPT-AI-Lab.git
+    cd GemPT-AI-Lab/backend
+    python -m venv .venv
+
+Windows PowerShell:
+
+    .\.venv\Scripts\Activate.ps1
+
+macOS/Linux:
+
+    source .venv/bin/activate
+
+의존성을 설치합니다.
+
     pip install -r requirements.txt
-    ```
-5.  **API 키 설정:**
-    *   `backend` 디렉토리에 `.env.example` 파일을 복사하여 `.env`라는 이름으로 생성합니다.
-    *   `.env` 파일을 열고 플레이스홀더 값을 발급받은 실제 API 키로 대체합니다.
-        ```env
-        # .env 예시
-        OPENAI_API_KEY="sk-YOUR_OPENAI_API_KEY"
-        GOOGLE_API_KEY="AIzaSy-YOUR_GOOGLE_API_KEY"
-        SERPAPI_API_KEY="YOUR_SERPAPI_KEY"
-        ```
 
-### 4.3. 애플리케이션 실행
+backend/.env.example을 backend/.env로 복사하고 키를 입력합니다. 현재 예제 파일에는 OpenAI와 Google 키가 있습니다. 검색 기능을 사용하려면 SERPAPI_API_KEY도 backend/.env에 추가하세요.
 
-1.  **Flask 서버 시작:**
-    *   `backend` 디렉토리에 있고 가상 환경이 활성화되어 있는지 확인합니다.
-    *   다음 명령어를 실행합니다:
-        ```bash
-        flask run
-        ```
-    *   서버는 일반적으로 `http://127.0.0.1:5000`(로컬)에서 시작됩니다.
-2.  **웹 인터페이스 열기:**
-    *   선호하는 웹 브라우저에서 `http://127.0.0.1:5000` URL을 엽니다.
+    OPENAI_API_KEY=your_openai_key
+    GOOGLE_API_KEY=your_google_key
+    SERPAPI_API_KEY=your_serpapi_key
 
-이제 이미지 업로드, 질문 입력, AI 모델들의 문제 해결 및 토론 과정을 확인하고 신뢰도 점수를 관리할 수 있습니다.
-[API 흐름도 docs](https://github.com/2025-X-Thon-Team2/2025-X-Thon-Team2_kongjjagkongjjagdugeundugeun/blob/main/docs/api_spec.md)
+백엔드 디렉터리에서 Flask 개발 서버를 실행합니다.
+
+    flask run
+
+기본 주소는 http://127.0.0.1:5000 입니다.
+
+## 데이터 및 제한 사항
+
+- 실제 API 키가 들어 있는 .env 파일은 커밋하지 마세요.
+- 현재 점수 저장 파일은 로컬 개발용이며 다중 인스턴스 운영용 저장소가 아닙니다.
+- LLM 응답이나 모델 간 합의는 정답을 보장하지 않습니다. 평가 결과와 도구의 적용 범위를 함께 확인해야 합니다.
+- 프로젝트의 현재 API와 구조는 고도화 과정에서 변경될 수 있으며, 변경 시 이 문서와 API 명세를 함께 갱신합니다.
+
+## 개발 원칙
+
+- 기존 동작과 API 계약을 확인한 뒤 작은 단위로 변경합니다.
+- 모델 호출, 도구 실행, 상태 전이, 사용자 응답을 구분해 기록합니다.
+- 허용된 도구만 실행하고 입력 스키마, 횟수, 시간 제한을 적용합니다.
+- 측정 전에는 정확도 향상이나 운영 성과를 주장하지 않습니다.
