@@ -1,5 +1,5 @@
 Pillow
-google-generativeai
+google-genai>=2.30.1,<3.0.0
 openai
 Flask
 python-dotenv
@@ -7,3 +7,7 @@ python-dotenv
 google-search-results
 pytest
 pytest-mock
+mcp>=1.9,<2
+uvicorn>=0.30,<1
+langgraph>=1.2.22,<2
+langgraph-checkpoint-sqlite>=3.1.3,<4
