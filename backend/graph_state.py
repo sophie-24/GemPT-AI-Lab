@@ -28,6 +28,11 @@ class GemPTState(TypedDict, total=False):
 
     # Workflow data. These values are safe to persist/checkpoint as text/JSON.
     subject: str
+    problem_type: str
+    agent_plan: dict[str, Any]
+    needs_search: bool
+    calculator_required: bool
+    calculator_checks: list[dict[str, Any]]
     search_queries: list[str]
     knowledge_package: str
     initial_answer: str

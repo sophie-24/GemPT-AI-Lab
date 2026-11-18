@@ -76,6 +76,7 @@ and [SqliteSaver reference](https://reference.langchain.com/python/langgraph.che
 - `expected_answer`: reference answer
 - `grading_criteria`: human-readable rubric for explanation/partial credit
 - `calculator_expected`: benchmark policy label for whether calculator use is expected
+- `search_expected`: benchmark policy label for whether the planner should search (optional for older case sets)
 - `verifier_probe`: fixed candidate solution to present to the verifier
 - `expected_verifier_verdict`: expected `correct`, `correction_needed`, or
   `uncertain` verdict for that probe
@@ -88,9 +89,10 @@ Each step may contain `name`, `duration_ms`, and `failed`. `run_live_eval.py`
 stores the end-to-end workflow's verifier label separately as
 `workflow_verifier_verdict`. Populate `verifier_verdict` only when the recorded
 verdict belongs to the fixed `verifier_probe`; otherwise verifier accuracy
-would compare different answers. This captures
-answer/tool/verifier/response metrics, graph call counts, and per-stage latency
-and failure counts. The runner checks API response structure against the
+would compare different answers. The live runner also records the planner's
+search/calculator decisions and whether search actually ran. This captures
+answer/tool/verifier/response and search-routing metrics, request latency, and
+failures. The runner checks API response structure against the
 existing `winner`, `final_answer`, `scores`, and `process` contract. It computes
 normalized exact-match accuracy against the answer section of GemPT's formatted
 response; nuanced explanations still require review against each case's rubric.
@@ -162,7 +164,9 @@ that a model, graph, MCP tool, or verifier ran successfully.
 The JSON report includes:
 
 - exact answer accuracy and observed denominator
+- planner calculator-selection accuracy, precision, and recall
 - calculator usage accuracy, plus precision/recall for calculator-needed cases
+- planner search-route accuracy, precision, and recall for cases with `search_expected`
 - verifier expected-verdict accuracy and misjudgment count
 - structured API response validity
 - total graph invocations

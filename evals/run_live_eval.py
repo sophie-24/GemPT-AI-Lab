@@ -115,7 +115,13 @@ def run(args: argparse.Namespace) -> int:
                 duration_ms = round((time.perf_counter() - started) * 1000, 2)
                 process = response.get("process", [])
                 calculator_calls = []
+                agent_plan = {}
                 for event in process:
+                    if event.get("step") == "Agent 실행 계획":
+                        try:
+                            agent_plan = json.loads(event.get("content", "{}"))
+                        except json.JSONDecodeError:
+                            agent_plan = {}
                     if event.get("step") == "MCP 도구 실행":
                         try:
                             payload = json.loads(event.get("content", "{}"))
@@ -128,6 +134,9 @@ def run(args: argparse.Namespace) -> int:
                     "input_mode": input_mode,
                     "final_answer": response.get("final_answer", ""),
                     "calculator_calls": calculator_calls,
+                    "planned_calculator": agent_plan.get("calculator_required"),
+                    "planned_search": agent_plan.get("needs_search"),
+                    "search_used": any(event.get("step") == "지식 수집" for event in process),
                     # This is the verdict on the workflow's generated answer.
                     # The fixed verifier_probe is a separate evaluation task.
                     "workflow_verifier_verdict": verifier_label(process, variant),

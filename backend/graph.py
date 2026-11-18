@@ -16,11 +16,9 @@ from workflow_services import (
     CALCULATOR_TOOLS,
     PROMPT_DEBATE_CONCLUSION,
     PROMPT_DEBATE_SUMMARY,
-    PROMPT_KNOWLEDGE_CRAWLER_QUERIES,
-    PROMPT_KNOWLEDGE_PACKAGE_GENERATOR,
+    PROMPT_AGENT_PLANNER,
     PROMPT_SOLVER_DEFENSE,
     PROMPT_SOLVER_INIT,
-    PROMPT_SUBJECT_CLASSIFIER,
     PROMPT_VERIFIER,
     PROMPT_VERIFIER_REBUTTAL,
     VERDICT_SCHEMA,
@@ -86,11 +84,57 @@ def _image_data_url(deps: GraphDependencies, image_ref: str) -> str:
     return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
-def _openai_response(deps: GraphDependencies, messages: list[dict[str, Any]], *, tools: bool) -> Any:
+def _openai_response(
+    deps: GraphDependencies,
+    messages: list[dict[str, Any]],
+    *,
+    tools: bool,
+    tool_choice: str = "auto",
+) -> Any:
     kwargs: dict[str, Any] = {"model": "gpt-4o", "messages": messages}
     if tools:
-        kwargs.update(tools=CALCULATOR_TOOLS, tool_choice="auto")
+        kwargs.update(tools=CALCULATOR_TOOLS, tool_choice=tool_choice)
     return deps.openai_client.chat.completions.create(**kwargs)
+
+
+def _agent_plan(deps: GraphDependencies, state: GemPTState) -> dict[str, Any]:
+    """Ask the model to choose a bounded workflow route for this problem."""
+    response = deps.openai_client.chat.completions.create(
+        model="gpt-4o",
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": PROMPT_AGENT_PLANNER},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": state["question"]},
+                    {"type": "image_url", "image_url": {"url": _image_data_url(deps, state["image_ref"])}},
+                ],
+            },
+        ],
+    )
+    raw = response.choices[0].message.content or "{}"
+    value = parse_json_object(raw)
+    problem_types = {
+        "arithmetic", "algebra", "geometry", "science", "factual",
+        "conceptual", "visual_uncertain", "other",
+    }
+    problem_type = value.get("problem_type")
+    if problem_type not in problem_types:
+        problem_type = "other"
+    queries = value.get("search_queries", [])
+    if not isinstance(queries, list):
+        queries = []
+    queries = [item.strip()[:200] for item in queries if isinstance(item, str) and item.strip()][:3]
+    needs_search = value.get("needs_search") is True and bool(queries)
+    return {
+        "subject": str(value.get("subject", "미분류"))[:80],
+        "problem_type": problem_type,
+        "needs_search": needs_search,
+        "search_queries": queries if needs_search else [],
+        "calculator_required": value.get("needs_calculator") is True,
+        "reason": str(value.get("reason", ""))[:300],
+    }
 
 
 def _plain_message(message: Any) -> dict[str, Any]:
@@ -147,45 +191,53 @@ def build_gempt_graph(dependencies: GraphDependencies, *, checkpointer: Any = No
         events.append(process_event(model, content, step))
         return {**updates, "process": events}
 
-    def classify_and_knowledge(state: GemPTState) -> dict[str, Any]:
+    def plan_request(state: GemPTState) -> dict[str, Any]:
         try:
-            image = _image_for_gemini(dependencies, state["image_ref"])
-            subject = dependencies.gemini_client.generate_text([PROMPT_SUBJECT_CLASSIFIER, state["question"], image]).strip()
-            queries_text = dependencies.gemini_client.generate_text(PROMPT_KNOWLEDGE_CRAWLER_QUERIES.format(subject=subject))
-            queries = [line.strip().lstrip("-• ") for line in queries_text.splitlines() if line.strip()][:4]
-            search_results = []
-            for query in queries:
-                try:
-                    search_results.append(f"'{query}' 검색 결과:\n{dependencies.search_fn(query)}")
-                except Exception as exc:
-                    search_results.append(f"'{query}' 검색 실패: {type(exc).__name__}")
-            raw = "\n\n".join(search_results)
-            package = dependencies.gemini_client.generate_text(
-                PROMPT_KNOWLEDGE_PACKAGE_GENERATOR.format(subject=subject, search_results=raw)
-            ).strip()
-            # Require well-shaped JSON, but preserve readable fallback text if a
-            # provider returns an invalid package.
-            try:
-                package = json.dumps(parse_json_object(package), ensure_ascii=False)
-            except (ValueError, json.JSONDecodeError):
-                pass
-            updates = {"subject": subject, "search_queries": queries, "knowledge_package": package}
-            event = append_event(state, "System", f"인식된 주제: {subject}", "주제 분류", **updates)
-            event["process"].append(process_event("System", raw, "지식 수집"))
-            event["process"].append(process_event("System", package, "지식 패키지 생성"))
-            return event
+            plan = _agent_plan(dependencies, state)
         except Exception as exc:
-            reason = f"분류/지식 수집 실패 ({type(exc).__name__})"
-            return append_event(state, "System", reason, "워크플로 오류", failure_reason=reason,
-                                winner="Draw (Timeout)", final_answer="문제 분석 중 서비스 오류가 발생했습니다.")
+            # If planning fails, take the conservative route: no external
+            # search and let the solver decide whether calculator is useful.
+            plan = {
+                "subject": "미분류", "problem_type": "other", "needs_search": False,
+                "search_queries": [], "calculator_required": False,
+                "reason": f"계획 생성 실패 ({type(exc).__name__}); 검색 생략",
+            }
+        updates = {
+            "subject": plan["subject"],
+            "problem_type": plan["problem_type"],
+            "agent_plan": plan,
+            "needs_search": plan["needs_search"],
+            "calculator_required": plan["calculator_required"],
+            "search_queries": plan["search_queries"],
+            "knowledge_package": "",
+        }
+        event = append_event(state, "GPT", json.dumps(plan, ensure_ascii=False), "Agent 실행 계획", **updates)
+        event["process"].append(process_event("System", f"인식된 주제: {plan['subject']} ({plan['problem_type']})", "주제 분류"))
+        if not plan["needs_search"]:
+            event["process"].append(process_event("System", "이 문제에는 외부 검색이 필요하지 않아 검색을 생략했습니다.", "검색 생략"))
+        return event
+
+    def retrieve_knowledge(state: GemPTState) -> dict[str, Any]:
+        results = []
+        for query in state.get("search_queries", [])[:3]:
+            try:
+                results.append({"query": query, "result": dependencies.search_fn(query), "ok": True})
+            except Exception as exc:
+                results.append({"query": query, "error": type(exc).__name__, "ok": False})
+        package = json.dumps({"subject": state.get("subject", ""), "sources": results}, ensure_ascii=False)
+        return append_event(
+            state, "System", package, "지식 수집", knowledge_package=package,
+        )
 
     def solve(state: GemPTState) -> dict[str, Any]:
         try:
             prompt = PROMPT_SOLVER_INIT.format(knowledge_package=state.get("knowledge_package", ""))
+            calculator_required = bool(state.get("calculator_required")) and int(state.get("tool_calls_used", 0)) == 0
             response = _openai_response(
                 dependencies,
                 _history_messages(state, prompt, dependencies),
                 tools=state.get("tool_calls_used", 0) < dependencies.max_tool_calls,
+                tool_choice="required" if calculator_required else "auto",
             )
             message = response.choices[0].message
             calls = getattr(message, "tool_calls", None) or []
@@ -201,8 +253,21 @@ def build_gempt_graph(dependencies: GraphDependencies, *, checkpointer: Any = No
             answer = getattr(message, "content", None) or "계산 도구 호출 후 풀이가 완성되지 않았습니다."
             history = list(state.get("solver_history", []))
             history.append({"role": "assistant", "content": answer})
-            return append_event(state, "GPT", answer, "초기 해결책", initial_answer=answer,
-                                current_answer=answer, solver_history=history, pending_tool_calls=[])
+            event = append_event(state, "GPT", answer, "초기 해결책", initial_answer=answer,
+                                 current_answer=answer, solver_history=history, pending_tool_calls=[])
+            checks = state.get("calculator_checks", [])
+            successful_checks = [item for item in checks if item.get("result", {}).get("ok") is True]
+            if successful_checks:
+                event["process"].append(process_event(
+                    "System", f"계산기 결과 {len(successful_checks)}건을 풀이에 전달한 뒤 최종 답을 생성했습니다.",
+                    "계산 결과 반영",
+                ))
+            elif state.get("calculator_required"):
+                event["process"].append(process_event(
+                    "System", "계산기 검산이 완료되지 않았습니다. 답변은 검산되지 않은 상태입니다.",
+                    "검산 미완료",
+                ))
+            return event
         except Exception as exc:
             reason = f"GPT 풀이 실패 ({type(exc).__name__})"
             return append_event(state, "System", reason, "워크플로 오류", failure_reason=reason,
@@ -213,6 +278,7 @@ def build_gempt_graph(dependencies: GraphDependencies, *, checkpointer: Any = No
         history = list(state.get("solver_history", []))
         events = list(state.get("process", []))
         used = int(state.get("tool_calls_used", 0))
+        checks = list(state.get("calculator_checks", []))
         try:
             client = dependencies.mcp_client_factory() if dependencies.mcp_client_factory else _default_mcp_client()
         except Exception as exc:
@@ -224,6 +290,7 @@ def build_gempt_graph(dependencies: GraphDependencies, *, checkpointer: Any = No
         for call in state.get("pending_tool_calls", []):
             name = call.get("name")
             raw_arguments = call.get("arguments", "")
+            arguments: Any = {}
             result: dict[str, Any]
             if used >= dependencies.max_tool_calls:
                 result = {"ok": False, "error": {"code": "call_limit", "message": "Calculator call limit reached."}}
@@ -247,13 +314,25 @@ def build_gempt_graph(dependencies: GraphDependencies, *, checkpointer: Any = No
                     result = {"ok": False, "error": {"code": "client_error", "message": type(exc).__name__}}
             rendered = json.dumps(result, ensure_ascii=False)
             events.append(process_event("System", json.dumps({"tool": name, "result": result}, ensure_ascii=False), "MCP 도구 실행"))
+            checks.append({
+                "tool": name,
+                "expression": arguments.get("expression", "") if isinstance(arguments, dict) else "",
+                "result": result,
+            })
             history.append({"role": "tool", "tool_call_id": str(call.get("id", "")), "content": rendered})
 
-        return {"solver_history": history, "process": events, "tool_calls_used": used, "pending_tool_calls": []}
+        return {"solver_history": history, "process": events, "tool_calls_used": used,
+                "calculator_checks": checks, "pending_tool_calls": []}
 
     def verify(state: GemPTState) -> dict[str, Any]:
+        failure_reason = ""
         try:
-            prompt = f"{PROMPT_VERIFIER}\n\n사용자 질문: {state['question']}\n\n해결책:\n{state.get('current_answer', '')}"
+            calculator_evidence = json.dumps(state.get("calculator_checks", []), ensure_ascii=False)
+            prompt = (
+                f"{PROMPT_VERIFIER}\n\n사용자 질문: {state['question']}"
+                f"\n\n해결책:\n{state.get('current_answer', '')}"
+                f"\n\n외부 계산기 검산 결과(JSON):\n{calculator_evidence}"
+            )
             raw = dependencies.gemini_client.generate_text(
                 [prompt, _image_for_gemini(dependencies, state["image_ref"])],
                 response_schema=VERDICT_SCHEMA,
@@ -261,6 +340,14 @@ def build_gempt_graph(dependencies: GraphDependencies, *, checkpointer: Any = No
             verdict = normalize_verdict(parse_json_object(raw))
         except Exception as exc:
             verdict = {"verdict": "uncertain", "critique": f"구조화 검증 실패 ({type(exc).__name__})", "answer": ""}
+            details = [type(exc).__name__]
+            stage = getattr(exc, "stage", None)
+            provider_code = getattr(exc, "provider_code", None)
+            if isinstance(stage, str) and stage:
+                details.append(f"stage={stage}")
+            if isinstance(provider_code, (int, str)):
+                details.append(f"provider_code={provider_code}")
+            failure_reason = f"검증 단계 실패 ({', '.join(details)})"
         updates: dict[str, Any] = {"verifier_result": verdict}
         if state.get("debate_round", 0) == 0:
             if verdict["verdict"] == "correct":
@@ -275,9 +362,16 @@ def build_gempt_graph(dependencies: GraphDependencies, *, checkpointer: Any = No
                 updates.update(winner="Gemini", final_answer=corrected, corrected_answer=corrected, is_correct=False)
             else:
                 updates.update(critique=verdict["critique"], corrected_answer=verdict["answer"] or state.get("corrected_answer", ""), is_correct=False)
-        return append_event(state, "Gemini", json.dumps(verdict, ensure_ascii=False),
+        if failure_reason:
+            updates["failure_reason"] = failure_reason
+        result = append_event(state, "Gemini", json.dumps(verdict, ensure_ascii=False),
                             "검증" if state.get("debate_round", 0) == 0 else f"라운드 {state.get('debate_round')} 재평가",
                             **updates)
+        if failure_reason:
+            result["process"] = list(result.get("process", [])) + [
+                process_event("System", failure_reason, "워크플로 오류")
+            ]
+        return result
 
     def defend(state: GemPTState) -> dict[str, Any]:
         next_round = int(state.get("debate_round", 0)) + 1
@@ -325,19 +419,24 @@ def build_gempt_graph(dependencies: GraphDependencies, *, checkpointer: Any = No
         # are optional and failure cannot invalidate a completed solve.
         summary_data = {"calculation_summary": "토론 결과를 최종 답안에 반영했습니다.",
                         "gpt_errors": [], "gemini_verification": []}
-        if state.get("critique"):
+        if state.get("failure_reason"):
+            summary_data["calculation_summary"] = "검증 API 오류로 교차검증을 중단했습니다. 아래 답은 GPT의 초기 풀이이며 검증되지 않았습니다."
+            summary_data["gemini_verification"] = [state["failure_reason"]]
+            conclusion = "Gemini 검증 요청이 실패해 추가 토론을 중단했습니다. 최종 답안은 GPT의 초기 풀이이며 정답 여부는 확인되지 않았습니다."
+        elif state.get("critique"):
             try:
                 summary_data.update(parse_json_object(dependencies.gemini_client.generate_text(
                     PROMPT_DEBATE_SUMMARY.format(initial_answer=state.get("initial_answer", ""), critique=state.get("critique", ""))
                 )))
             except Exception:
                 summary_data["gemini_verification"] = [state.get("critique", "검증 내용을 요약하지 못했습니다.")]
-        try:
-            conclusion = dependencies.gemini_client.generate_text(
-                PROMPT_DEBATE_CONCLUSION.format(winner=winner, final_answer=answer)
-            )
-        except Exception:
-            conclusion = "교차검증이 종료되었습니다. 상세 결과는 위 최종 답안과 실행 로그를 확인하세요."
+        if not state.get("failure_reason"):
+            try:
+                conclusion = dependencies.gemini_client.generate_text(
+                    PROMPT_DEBATE_CONCLUSION.format(winner=winner, final_answer=answer)
+                )
+            except Exception:
+                conclusion = "교차검증이 종료되었습니다. 상세 결과는 위 최종 답안과 실행 로그를 확인하세요."
         formatted = (
             f"[1] 최종 답안\n{answer}\n\n"
             f"[2] 계산 근거 요약\n{summary_data.get('calculation_summary', '')}\n\n"
@@ -359,10 +458,15 @@ def build_gempt_graph(dependencies: GraphDependencies, *, checkpointer: Any = No
             return "verify"
         return "finalize"
 
+    def after_plan(state: GemPTState) -> str:
+        return "retrieve" if state.get("needs_search") and state.get("search_queries") else "solve"
+
     def after_tools(state: GemPTState) -> str:
         return "solve"
 
     def after_verify(state: GemPTState) -> str:
+        if state.get("failure_reason"):
+            return "finalize"
         if state.get("winner"):
             return "finalize"
         if int(state.get("debate_round", 0)) >= dependencies.max_debate_rounds:
@@ -374,16 +478,17 @@ def build_gempt_graph(dependencies: GraphDependencies, *, checkpointer: Any = No
                             winner="Draw (Timeout)", final_answer=state.get("corrected_answer") or state.get("initial_answer", ""))
 
     graph = StateGraph(GemPTState)
-    graph.add_node("classify_and_knowledge", classify_and_knowledge)
+    graph.add_node("plan", plan_request)
+    graph.add_node("retrieve", retrieve_knowledge)
     graph.add_node("solve", solve)
     graph.add_node("mcp_tools", call_mcp_tools)
     graph.add_node("verify", verify)
     graph.add_node("defend", defend)
     graph.add_node("finalize", finalize)
     graph.add_node("timeout", timeout)
-    graph.set_entry_point("classify_and_knowledge")
-    graph.add_conditional_edges("classify_and_knowledge", lambda s: "finalize" if s.get("failure_reason") else "solve",
-                               {"finalize": "finalize", "solve": "solve"})
+    graph.set_entry_point("plan")
+    graph.add_conditional_edges("plan", after_plan, {"retrieve": "retrieve", "solve": "solve"})
+    graph.add_edge("retrieve", "solve")
     graph.add_conditional_edges("solve", after_solve, {"mcp_tools": "mcp_tools", "verify": "verify", "finalize": "finalize"})
     graph.add_conditional_edges("mcp_tools", after_tools, {"defend": "defend", "solve": "solve"})
     graph.add_conditional_edges("verify", after_verify, {"finalize": "finalize", "defend": "defend", "timeout": "timeout"})
