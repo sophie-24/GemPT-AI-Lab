@@ -2,7 +2,7 @@
 
 듀얼 LLM 기반 문제 풀이 검증 서비스 GemPT를 출발점으로, Agent 실행 흐름과 도구 사용, 평가 방법을 단계적으로 실험하는 프로젝트입니다.
 
-> **현재 상태:** 저장소에는 기존 GemPT 기능이 구현되어 있습니다. Agent 고도화 항목은 계획이며, 아래에서 구현 상태와 계획을 구분해 설명합니다.
+> **현재 상태:** 기존 Flask GemPT에 LangGraph 실행 경로, SQLite 체크포인트, 이미지 참조 저장소, 오프라인 평가 데이터와 집계기가 추가되었습니다. LangGraph 경로와 라이브 모델 성능은 검증 전이며, 아래에서 구현 파일과 실제 확인 결과를 구분합니다.
 
 ## 프로젝트 소개
 
@@ -19,8 +19,13 @@ GemPT-AI-Lab의 고도화 방향은 기존 문제 풀이 흐름에 Agent 상태 
 - 의견이 다르면 최대 5회까지 반박·수정 과정을 진행합니다.
 - 최종 답변, 모델 점수, 단계별 처리 내용을 응답으로 반환합니다.
 - 프로젝트별 GPT·Gemini 점수를 로컬 JSON 파일에 저장합니다.
+- GPT가 선택한 산술 계산을 Flask의 MCP Client가 제한된 calculator 도구로 전달하고, 결과를 기존 풀이 흐름에 포함합니다. MCP 실행 이벤트는 `process`에 기록됩니다.
+- `POST /api/solve`는 LangGraph 실행 경로를 사용합니다. 기존 순차 실행 경로는 비교 기준선인 `run_analysis_logic_legacy`로 보존했습니다.
+- 그래프 실행은 `run_id`별 SQLite 체크포인트를 사용하고, 이미지 파일은 `/data/uploads`에 저장해 그래프 상태에는 `image_ref`만 둡니다.
+- 오프라인 평가 데이터와 집계기는 기준선·LangGraph 관측치를 구현별로 나눠 답 일치율, 도구 사용, Verifier 판정, 응답 구조, 단계 지연과 실패를 요약합니다.
+- `GET /healthz`, API/MCP 컨테이너 및 Docker Compose 설정, 로컬 Kubernetes 매니페스트가 준비되어 있습니다. Compose 이미지 빌드와 두 컨테이너의 헬스 상태, API 컨테이너에서 MCP calculator까지의 호출은 확인했습니다.
 
-현재 검색은 Agent가 선택하는 도구 호출이 아니라 고정된 처리 단계입니다. 실행은 Flask 요청 안에서 동기적으로 진행되며, 실행 상태 조회나 재개 API는 없습니다.
+현재 검색은 Agent가 선택하는 도구 호출이 아니라 고정된 처리 단계입니다. 실행은 Flask 요청 안에서 동기적으로 진행됩니다. 체크포인트는 저장되지만 실행 상태 조회·재개 API는 제공하지 않습니다. 평가 사례는 text-only이므로 이미지 인식 성능을 측정하지 않습니다.
 
 ## 현재 처리 흐름
 
@@ -38,6 +43,7 @@ GemPT-AI-Lab의 고도화 방향은 기존 문제 풀이 흐름에 Agent 상태 
 | Method | Endpoint | 설명 |
 | --- | --- | --- |
 | GET | / | 웹 애플리케이션 제공 |
+| GET | /healthz | API 상태 확인 |
 | POST | /api/solve | multipart/form-data로 image, 선택 질문 question, 선택 project_id를 받아 풀이 |
 | GET | /api/scores/{project_id} | 프로젝트별 모델 점수 조회 |
 
@@ -51,9 +57,9 @@ POST /api/solve는 현재 winner, final_answer, scores, process 필드를 반환
 - **Frontend:** React, Tailwind CSS, MathJax
 - **현재 저장:** 프로젝트 점수용 로컬 JSON 파일
 
-## MVP 고도화: MCP와 Kubernetes
+## MCP·LangGraph·Kubernetes 실행 구조
 
-이번 MVP의 중심은 MCP 도구 연동과 Kubernetes 운영입니다. 기존 Flask 문제 풀이 서비스를 컨테이너화하고, MCP 도구 서버와 연결해 로컬 Kubernetes 환경에 배포하는 end-to-end 흐름을 만듭니다. 현재 이 항목들은 계획 단계이며 구현 완료 기능이 아닙니다.
+현재 구현은 기존 Flask API, LangGraph 실행 흐름, 별도 MCP 계산기 서비스와 컨테이너·Kubernetes 리소스를 연결하는 구조입니다. Compose 경로는 일부 확인했으며, LangGraph 전체 실행과 Kubernetes 배포 상태는 아래 제한 사항에 구분해 기록합니다.
 
 ### 목표 구조
 
@@ -67,31 +73,34 @@ POST /api/solve는 현재 winner, final_answer, scores, process 필드를 반환
 
 Flask 애플리케이션은 MCP Client 역할을 합니다. LLM이 계산 도구 호출을 요청하면 서버가 허용된 도구와 입력을 확인하고 MCP Server에 전달합니다. LLM이 MCP 서버에 직접 연결되는 구조는 아닙니다.
 
-### 2일 MVP 범위
+### 구현 범위와 검증 상태
 
-1. **MCP 도구:** 별도 MCP Server에 제한된 산술 계산 도구 한 개를 구현하고, Flask 앱에서 MCP Client로 검색·호출합니다.
-2. **안전한 호출:** 도구 허용 목록, 인자 스키마, 식 복잡도, 호출 시간·횟수를 제한하고 성공·실패 결과를 기록합니다.
-3. **컨테이너 실행:** Flask API와 MCP Server를 별도 이미지로 만들고 Docker Compose로 함께 실행합니다.
-4. **Kubernetes 배포:** 로컬 클러스터에 API와 MCP Server를 각각 Deployment와 Service로 배포합니다. Secret/ConfigMap, readiness/liveness probe, 파드 로그 확인 절차를 포함합니다.
-5. **동작 시연:** 한 문제 요청에서 LLM 도구 호출 → MCP Server 실행 → 결과 반영 → 최종 응답까지 확인합니다. 실행 단계와 종료 사유를 로그에서 식별할 수 있게 합니다.
-6. **기존 호환성:** 현재 /api/solve 응답 필드를 유지하고, 기존 이미지 풀이·토론 동작이 계속 가능한 방법을 문서화합니다.
+1. **MCP 도구:** 별도 MCP Server의 제한된 calculator를 Flask MCP Client가 호출합니다.
+2. **안전한 호출:** 허용 목록·입력 검사·시간 제한·호출 수 제한·구조화 결과를 적용합니다.
+3. **LangGraph:** 분류·검색·풀이·도구 실행·검증·토론·종료 단계를 그래프 상태와 분기로 관리합니다.
+4. **영속성:** `run_id` 기반 SQLite 체크포인트와 별도 이미지 파일 저장을 사용합니다.
+5. **평가 준비:** 고정 text-only 사례와 `legacy`/`langgraph` 관측치를 나눠 집계하는 오프라인 평가기를 둡니다.
+6. **컨테이너·Kubernetes:** Compose 파일과 Kubernetes Deployment·Service·PVC 등 매니페스트를 제공합니다.
+7. **API 호환성:** `/api/solve`의 `winner`, `final_answer`, `scores`, `process` 필드를 유지합니다.
 
 현재 점수 파일이 로컬 JSON이므로 MVP에서는 API 파드 한 개로 실행하고 데이터 파일 보존 방식을 명시합니다. 여러 API 파드로 확장하거나 운영 수준의 가용성을 주장하지 않습니다.
 
-### 2일 작업 순서
+### 확인된 실행 결과와 남은 확인
 
-- **1일차:** 인터페이스 확정, MCP Server와 계산 도구 구현, Flask MCP Client 연결, Docker Compose에서 두 서비스 실행
-- **2일차:** Kubernetes 매니페스트 작성, 로컬 클러스터 배포, 서비스 연결·헬스 상태·로그 확인, 전체 시연과 문서 정리
+- Compose 이미지 빌드, API/MCP health 상태, 기존 Flask MCP Client의 calculator 호출은 관측했습니다.
+- LangGraph를 통한 실제 `/api/solve` 요청과 API 키가 필요한 평가 실행은 아직 관측하지 않았습니다.
+- Kubernetes 매니페스트는 준비됐지만, 사용 가능한 kubectl context가 없어 클러스터 적용·Pod 준비 상태·로그는 관측하지 않았습니다.
 
 ### MVP 이후 확장
 
 - Agent 실행 상태와 대화별 지속 저장
 - 평가 하네스와 프롬프트·도구 설명 버전 비교
 - OpenTelemetry 기반 trace와 Langfuse 또는 Phoenix 시각화
-- 여러 MCP 도구, LangGraph 등 Agent 프레임워크 평가
+- 이미지 기반 평가 데이터와 풀이 설명 루브릭 채점
+- 동시성 증가 시 JSON/SQLite 파일 저장소를 공유 DB로 교체
 - GitHub Actions에서 품질 검사와 컨테이너 빌드 자동화
 
-MCP Server, Kubernetes, Docker Compose, 실행 상태·평가 하네스는 현재 구현된 기능이 아닙니다. 구현 후 동작과 측정 결과를 확인해 상태를 갱신합니다.
+평가 사례는 현재 텍스트 입력만 포함하므로, 결과는 이미지 인식 성능을 나타내지 않습니다. 오프라인 fixture도 지표 집계 형식 예시이며 모델 품질 측정값이 아닙니다. 점수 저장은 로컬 JSON이며 API 복제본은 하나로 제한합니다. 실행·비교 세부사항은 [평가 안내](docs/evaluation.md), Kubernetes 절차와 관측 제한은 [Kubernetes 안내](docs/kubernetes.md)를 참고하세요.
 ## 로컬 실행
 
 ### 준비물
@@ -129,6 +138,8 @@ backend/.env.example을 backend/.env로 복사하고 키를 입력합니다. 현
     flask run
 
 기본 주소는 http://127.0.0.1:5000 입니다.
+
+로컬 Compose 통합은 저장소 루트에서 `docker compose build` 후 `docker compose up`으로 실행합니다. `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `SERPAPI_API_KEY`는 환경 변수로 전달하고, 점수 파일은 `PROJECT_DB_FILE=/data/project_db.json`으로 설정된 named volume에 저장됩니다. 점수 JSON 파일을 사용하는 동안 API는 1개 인스턴스로 운영해야 합니다.
 
 ## 데이터 및 제한 사항
 

@@ -13,6 +13,12 @@ GemPT API 명세서 (API Specification)
 
 5. API 엔드포인트 상세
 
+   5.0. 상태 확인
+
+      5.0.1. 엔드포인트: /healthz
+      5.0.2. 메서드: GET
+      5.0.3. 응답 예시: {"status": "ok"}
+
    5.1. 프론트엔드 HTML 페이지 제공
 
       5.1.1. 엔드포인트
@@ -61,6 +67,8 @@ GemPT API 명세서 (API Specification)
               model: String - 메시지를 생성한 AI 또는 시스템 ("GPT", "Gemini", "System").
               content: String - AI의 메시지 내용 또는 시스템 업데이트 메시지.
               step: String - 해당 과정의 단계 설명 (예: "주제 분류", "초기 해결책", "검증", "라운드 1 방어").
+              MCP 계산기 호출이 있으면 model="System", step="MCP 도구 실행" 항목에 구조화된 성공 또는 오류 결과가 포함됩니다. 계산 호출은 요청당 최대 3회입니다.
+              첫 process 항목에는 실행 추적용 run_id가 step="실행 ID"로 기록됩니다.
 
       5.2.6. 에러 응답
             400 Bad Request: {"error": "No image file provided"} 또는 {"error": "No selected file"}
@@ -91,74 +99,23 @@ GemPT API 명세서 (API Specification)
 
 6. API 상세 흐름도
 
-   본 섹션은 /api/solve 엔드포인트 호출 시 발생하는 AI 시스템의 상세 처리 흐름을 설명합니다.
+   현재 Flask 경로는 LangGraph Orchestrator를 통해 실행합니다. 기존 순차 실행 함수는 비교 기준선으로 보존합니다.
 ```mermaid
-graph TD
-
-    subgraph FE [프론트엔드]
-        A[User Input: Question, Image] --> B[POST /api/solve]
-    end
-
-    subgraph BE [백엔드]
-
-        B --> C{run_analysis_logic 시작}
-
-        C --> D[1. 프로젝트 신뢰도 로드]
-        D --> E[2. 이미지 과목 분류 - Gemini]
-        E --> F[3. 지식 크롤링 및 패키지 생성]
-        F --> G[4. 다국어 번역 로직]
-        G --> H[5. GPT 초기 답변 생성 A01]
-        H --> I[6. Gemini 검증 R02]
-
-        I --> J{R02 == 정답?}
-
-        %% --- 동의 ---
-        J -- Yes --> K[신뢰도 업데이트 - 동의]
-        K --> L[최종 답변 = A01]
-        L --> M[토론 종료]
-
-        %% --- 반박 ---
-        J -- No --> N[토론 루프 시작]
-        N --> O[Loop 증가 및 GPT 방어]
-
-        O --> P{GPT 오류 인정?}
-
-        %% --- GPT 인정 = Gemini 승 ---
-        P -- Yes --> Q[신뢰도 업데이트 - Gemini 승]
-        Q --> R[최종 답변 = Gemini 제안]
-        Q --> M
-        R --> M
-
-        %% --- GPT 반박 유지 ---
-        P -- No --> S[Gemini 재평가]
-        S --> T{Gemini 확신 변화?}
-
-        %% --- Gemini 설득됨 → GPT 승 ---
-        T -- conv --> U[신뢰도 업데이트 - GPT 승]
-        U --> V[최종 답변 = GPT 방어]
-        U --> M
-        V --> M
-
-        %% --- Gemini 정정함 → Gemini 승 ---
-        T -- corr --> W[신뢰도 업데이트 - Gemini 승]
-        W --> X[최종 답변 = GPT 방어]
-        W --> M
-        X --> M
-
-        %% --- 둘 다 고집 → 루프 반복 ---
-        T -- No --> Y{Loop < max?}
-        Y -- Yes --> O
-        Y -- No --> Z[신뢰도 업데이트 - Timeout]
-        Z --> AA[신뢰도 비교 후 최종 답변 결정]
-        AA --> M
-
-        %% --- 백엔드 종료 ---
-        M --> BB[신뢰도 저장]
-        BB --> CC[최종 응답 생성]
-        CC --> DD[run_analysis_logic 종료]
-    end
-
-    DD --> EE[프론트엔드: 최종 답변 및 점수 표시]
+flowchart TD
+    A[이미지·질문] --> B[Flask /api/solve: run_id 발급·이미지 저장]
+    B --> C[LangGraph: 과목 분류·검색·지식 패키지]
+    C --> D[GPT Solver]
+    D -->|도구 요청| E[입력·허용 목록 검사]
+    E --> F[MCP Client → MCP Calculator]
+    F --> D
+    D --> G[Gemini 구조화 검증]
+    G -->|correct| H[최종 답변 확정]
+    G -->|correction_needed| I[GPT 방어·Gemini 재검증]
+    G -->|uncertain| I
+    I -->|판정 완료 또는 라운드 한도| H
+    I -->|계속 검토| G
+    H --> J[점수·체크포인트 기록]
+    J --> K[winner·final_answer·scores·process 반환]
 ```
 
 ```
