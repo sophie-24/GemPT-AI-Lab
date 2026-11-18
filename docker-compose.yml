@@ -1,0 +1,43 @@
+services:
+  mcp-tools:
+    image: gempt-mcp-tools:dev
+    build:
+      context: .
+      dockerfile: backend/mcp_server/Dockerfile
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  api:
+    image: gempt-api:dev
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    depends_on:
+      mcp-tools:
+        condition: service_healthy
+    environment:
+      MCP_SERVER_URL: http://mcp-tools:8000/mcp
+      PROJECT_DB_FILE: /data/project_db.json
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      SERPAPI_API_KEY: ${SERPAPI_API_KEY:-}
+    ports:
+      - "5000:5000"
+    volumes:
+      - project-data:/data
+      - ./evals:/app/evals:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/healthz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  project-data:
