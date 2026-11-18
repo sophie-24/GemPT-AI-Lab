@@ -1,12 +1,17 @@
 import os
 import json
 import base64
+import uuid
 from flask import Flask, request, jsonify, render_template
 from PIL import Image
-import google.generativeai as genai
 from openai import OpenAI
 from dotenv import load_dotenv
 from serpapi import GoogleSearch
+from mcp_client import MCPClient
+from checkpoint_store import checkpoint_config, open_checkpointer
+from graph import GraphDependencies, build_gempt_graph
+from image_store import open_image, save_image
+from model_clients import GeminiModelClient
 
 # .env 파일에서 환경 변수를 로드합니다.
 load_dotenv()
@@ -24,7 +29,8 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY")
 SERPAPI_API_KEY = os.environ.get("SERPAPI_API_KEY", "YOUR_SERPAPI_API_KEY")
 
 PROJECT_ID = "team_hackathon_demo"
-DB_FILE = "project_db.json"
+DB_FILE = os.environ.get("PROJECT_DB_FILE", "project_db.json")
+MCP_MAX_TOOL_CALLS = 3
 
 # =======================================================
 # [Prompt Engineering] System Prompts (Korean)
@@ -245,10 +251,10 @@ def format_final_summary(gemini_model, a01, r02, final_answer, winner, is_correc
         try:
             # 토론 요약 (계산 근거, 오류 포인트, 검증 근거)
             summary_prompt = PROMPT_DEBATE_SUMMARY.format(a01=a01, r02=r02)
-            summary_response = gemini_model.generate_content([summary_prompt])
+            summary_response = gemini_model.generate_text([summary_prompt])
             
             # 응답에서 JSON 부분만 추출
-            cleaned_json_string = summary_response.text.strip()
+            cleaned_json_string = summary_response.strip()
             if cleaned_json_string.startswith("```json"):
                 cleaned_json_string = cleaned_json_string[len("```json"):].strip()
             if cleaned_json_string.endswith("```"):
@@ -267,8 +273,8 @@ def format_final_summary(gemini_model, a01, r02, final_answer, winner, is_correc
     conclusion_summary = ""
     try:
         conclusion_prompt = PROMPT_DEBATE_CONCLUSION.format(winner=winner, final_answer=final_answer)
-        conclusion_response = gemini_model.generate_content([conclusion_prompt])
-        conclusion_summary = conclusion_response.text.strip()
+        conclusion_response = gemini_model.generate_text([conclusion_prompt])
+        conclusion_summary = conclusion_response.strip()
     except Exception as e:
         print(f"Error generating conclusion summary: {e}")
         conclusion_summary = "최종 결론을 요약하는 데 실패했습니다."
@@ -298,10 +304,9 @@ def format_final_summary(gemini_model, a01, r02, final_answer, winner, is_correc
 # =======================================================
 # [Core Logic] AI Analysis and Debate Process (New Pipeline)
 # =======================================================
-def run_analysis_logic(project_id, image_file, user_question):
-    genai.configure(api_key=GOOGLE_API_KEY)
+def run_analysis_logic_legacy(project_id, image_file, user_question):
     client_gpt = OpenAI(api_key=OPENAI_API_KEY)
-    gemini_model = genai.GenerativeModel('gemini-2.5-pro')
+    gemini_model = GeminiModelClient(api_key=GOOGLE_API_KEY, model_name='gemini-2.5-pro')
     
     credit_scores = load_project_scores(project_id)
     status_updates = []
@@ -310,16 +315,16 @@ def run_analysis_logic(project_id, image_file, user_question):
     pil_image = Image.open(image_file)
 
     # === Step 1: Subject Classification ===
-    subject_response = gemini_model.generate_content(
+    subject_response = gemini_model.generate_text(
         [PROMPT_SUBJECT_CLASSIFIER, user_question, pil_image]
     )
-    subject = subject_response.text.strip()
+    subject = subject_response.strip()
     status_updates.append({"model": "System", "content": f"인식된 주제: {subject}", "step": "주제 분류"})
 
     # === Step 2: Knowledge Crawling ===
     queries_prompt = PROMPT_KNOWLEDGE_CRAWLER_QUERIES.format(subject=subject)
-    queries_response = gemini_model.generate_content([queries_prompt])
-    search_queries = queries_response.text.strip().split('\n')
+    queries_response = gemini_model.generate_text([queries_prompt])
+    search_queries = queries_response.strip().split('\n')
     
     raw_search_results = ""
     crawling_content = "생성된 검색어:\n" + "\n".join(search_queries) + "\n\n--- 검색 결과 ---\n"
@@ -333,8 +338,8 @@ def run_analysis_logic(project_id, image_file, user_question):
 
     # === Step 3: Knowledge Package Generation ===
     package_prompt = PROMPT_KNOWLEDGE_PACKAGE_GENERATOR.format(subject=subject, search_results=raw_search_results)
-    package_response = gemini_model.generate_content([package_prompt])
-    cleaned_json_string = package_response.text.strip().replace("```json", "").replace("```", "")
+    package_response = gemini_model.generate_text([package_prompt])
+    cleaned_json_string = package_response.strip().replace("```json", "").replace("```", "")
     knowledge_package_str = cleaned_json_string
     status_updates.append({"model": "System", "content": knowledge_package_str, "step": "지식 패키지 생성"})
 
@@ -343,26 +348,72 @@ def run_analysis_logic(project_id, image_file, user_question):
     base64_image = base64.b64encode(image_file.read()).decode('utf-8')
     solver_prompt = PROMPT_SOLVER_INIT.format(knowledge_package=knowledge_package_str)
     
+    solve_messages = [
+        {"role": "system", "content": solver_prompt},
+        {"role": "user", "content": [
+            {"type": "text", "text": user_question},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+        ]}
+    ]
+    calculator_tool = [{
+        "type": "function",
+        "function": {
+            "name": "calculator",
+            "description": "Evaluate a simple arithmetic expression when an exact calculation is useful.",
+            "parameters": {
+                "type": "object",
+                "properties": {"expression": {"type": "string", "description": "Arithmetic expression"}},
+                "required": ["expression"],
+                "additionalProperties": False
+            }
+        }
+    }]
     response_01 = client_gpt.chat.completions.create(
         model="gpt-4o",
-        messages=[
-            {"role": "system", "content": solver_prompt},
-            {"role": "user", "content": [
-                {"type": "text", "text": user_question},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-            ]}
-        ]
+        messages=solve_messages,
+        tools=calculator_tool,
+        tool_choice="auto"
     )
-    a01 = response_01.choices[0].message.content
+    tool_calls_used = 0
+    mcp_client = MCPClient.from_env()
+    while response_01.choices[0].message.tool_calls:
+        assistant_message = response_01.choices[0].message
+        solve_messages.append(assistant_message.model_dump(exclude_none=True))
+        for tool_call in assistant_message.tool_calls:
+            if tool_calls_used >= MCP_MAX_TOOL_CALLS:
+                tool_result = {"ok": False, "error": {"code": "call_limit", "message": "Calculator call limit reached."}}
+            else:
+                tool_calls_used += 1
+                try:
+                    arguments = json.loads(tool_call.function.arguments)
+                    if set(arguments) != {"expression"} or not isinstance(arguments["expression"], str):
+                        raise ValueError("calculator expects exactly one string argument: expression")
+                    tool_result = mcp_client.call_tool("calculator", arguments, timeout=5.0)
+                except Exception as exc:
+                    tool_result = {"ok": False, "error": {"code": "client_error", "message": str(exc)}}
+            status_updates.append({
+                "model": "System",
+                "content": json.dumps({"tool": "calculator", "result": tool_result}, ensure_ascii=False),
+                "step": "MCP 도구 실행"
+            })
+            solve_messages.append({
+                "role": "tool", "tool_call_id": tool_call.id,
+                "content": json.dumps(tool_result, ensure_ascii=False)
+            })
+        response_01 = client_gpt.chat.completions.create(
+            model="gpt-4o", messages=solve_messages, tools=calculator_tool,
+            tool_choice="auto" if tool_calls_used < MCP_MAX_TOOL_CALLS else "none"
+        )
+    a01 = response_01.choices[0].message.content or "계산 도구 호출 한도에 도달하여 풀이가 완성되지 않았습니다."
     status_updates.append({"model": "GPT", "content": a01, "step": "초기 해결책"})
 
     # === Step 5: Gemini Verification ===
     image_file.seek(0)
     pil_image_verify = Image.open(image_file)
-    response_02 = gemini_model.generate_content(
+    response_02 = gemini_model.generate_text(
         [PROMPT_VERIFIER_INIT, f"사용자 질문: {user_question}\n\n모델 01 해결책:\n{a01}", pil_image_verify]
     )
-    r02 = response_02.text
+    r02 = response_02
     status_updates.append({"model": "Gemini", "content": r02, "step": "검증"})
     
     is_correct = "따라서 모델 01의 답변이 올바릅니다." in r02
@@ -409,10 +460,10 @@ def run_analysis_logic(project_id, image_file, user_question):
                 loop_active = False
                 break
 
-            response_loop_gemini = gemini_model.generate_content(
+            response_loop_gemini = gemini_model.generate_text(
                 [PROMPT_VERIFIER_REBUTTAL, f"GPT 방어:\n{gpt_defense}", pil_image_verify]
             )
-            gemini_reaction = response_loop_gemini.text
+            gemini_reaction = response_loop_gemini
             status_updates.append({"model": "Gemini", "content": gemini_reaction, "step": f"라운드 {current_loop} 재평가"})
 
             if "원래 주장이 옳았음을 인정합니다" in gemini_reaction:
@@ -457,6 +508,46 @@ def run_analysis_logic(project_id, image_file, user_question):
         "process": status_updates
     }
 
+
+def run_analysis_logic(project_id, image_file, user_question):
+    """Run the LangGraph workflow while preserving the legacy API response."""
+    run_id = uuid.uuid4().hex
+    image_bytes = image_file.read()
+    image_ref = save_image(run_id, image_bytes)
+
+    dependencies = GraphDependencies(
+        openai_client=OpenAI(api_key=OPENAI_API_KEY),
+        gemini_client=GeminiModelClient(),
+        image_loader=open_image,
+        search_fn=perform_google_search,
+        load_scores=load_project_scores,
+        save_scores=save_project_scores,
+        mcp_client_factory=MCPClient.from_env,
+        max_tool_calls=MCP_MAX_TOOL_CALLS,
+        max_debate_rounds=5,
+    )
+
+    with open_checkpointer() as checkpoint:
+        graph = build_gempt_graph(dependencies, checkpointer=checkpoint.checkpointer)
+        result = graph.invoke({
+            "run_id": run_id,
+            "project_id": project_id,
+            "question": user_question,
+            "image_ref": image_ref,
+            "process": [{"model": "System", "content": run_id, "step": "실행 ID"}],
+            "debate_round": 0,
+            "tool_calls_used": 0,
+        }, config=checkpoint_config(run_id))
+
+    # Keep the established /api/solve response contract. The run ID is exposed
+    # in process for trace correlation without adding a new top-level field.
+    return {
+        "winner": result.get("winner", "Draw (Timeout)"),
+        "final_answer": result.get("final_answer", "풀이를 완료하지 못했습니다."),
+        "scores": result.get("scores", load_project_scores(project_id)),
+        "process": result.get("process", []),
+    }
+
 # =======================================================
 # [API 라우트] 웹 페이지 및 API 엔드포인트
 # =======================================================
@@ -464,6 +555,10 @@ def run_analysis_logic(project_id, image_file, user_question):
 @app.route('/')
 def index():
     return render_template('index.html')
+
+@app.route('/healthz', methods=['GET'])
+def healthz():
+    return jsonify({"status": "ok"})
 
 @app.route('/api/solve', methods=['POST'])
 def solve_problem():
