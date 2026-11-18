@@ -46,10 +46,7 @@ GemPT API 명세서 (API Specification)
             POST
 
       5.2.3. 설명
-            사용자가 문제 이미지와 질문을 제출하면, AI 시스템이 다음 과정을 거쳐 최종 솔루션과 함께 업데이트된 신뢰도 점수를 반환합니다:
-            1) 이미지 과목 인식 및 사전 정보 크롤링
-            2) 다국어 번역 AI 로직 처리
-            3) GPT와 Gemini 간의 문제 해결, 검증 및 토론
+            사용자가 문제 이미지와 질문을 제출하면 Agent가 문제 유형을 분류하고 외부 검색 및 calculator 사용 여부를 선택합니다. 검색이 필요할 때만 검색을 수행하고, calculator 결과를 Solver 대화에 돌려준 뒤 검증·토론을 진행합니다. 기존 응답 필드와 점수 저장 계약은 유지합니다.
             이 모든 과정은 제출된 project_id에 따라 기록되고 점수에 반영됩니다.
 
       5.2.4. 요청 바디 (Form Data - multipart/form-data)
@@ -67,6 +64,7 @@ GemPT API 명세서 (API Specification)
               model: String - 메시지를 생성한 AI 또는 시스템 ("GPT", "Gemini", "System").
               content: String - AI의 메시지 내용 또는 시스템 업데이트 메시지.
               step: String - 해당 과정의 단계 설명 (예: "주제 분류", "초기 해결책", "검증", "라운드 1 방어").
+              LangGraph 경로에는 "Agent 실행 계획" (problem_type, needs_search, calculator_required), "검색 생략" 또는 조건부 "지식 수집", "계산 결과 반영" / "검산 미완료" 이벤트가 추가될 수 있습니다. 응답 최상위 스키마는 바뀌지 않습니다.
               MCP 계산기 호출이 있으면 model="System", step="MCP 도구 실행" 항목에 구조화된 성공 또는 오류 결과가 포함됩니다. 계산 호출은 요청당 최대 3회입니다.
               첫 process 항목에는 실행 추적용 run_id가 step="실행 ID"로 기록됩니다.
 
@@ -103,11 +101,13 @@ GemPT API 명세서 (API Specification)
 ```mermaid
 flowchart TD
     A[이미지·질문] --> B[Flask /api/solve: run_id 발급·이미지 저장]
-    B --> C[LangGraph: 과목 분류·검색·지식 패키지]
-    C --> D[GPT Solver]
-    D -->|도구 요청| E[입력·허용 목록 검사]
+    B --> C[GPT-4o Agent 계획: 유형·검색·계산 필요 여부]
+    C -->|검색 필요| S[SerpAPI: 최대 3개 질의]
+    C -->|검색 불필요| D[GPT Solver]
+    S --> D
+    D -->|계산 필요·도구 요청| E[입력·허용 목록 검사]
     E --> F[MCP Client → MCP Calculator]
-    F --> D
+    F -->|실제 계산 결과| D
     D --> G[Gemini 구조화 검증]
     G -->|correct| H[최종 답변 확정]
     G -->|correction_needed| I[GPT 방어·Gemini 재검증]

@@ -52,6 +52,8 @@ def validate_cases(cases: list[dict[str, Any]]) -> None:
         ids.add(case["id"])
         if not isinstance(case["calculator_expected"], bool):
             raise ValueError(f"case {case['id']}: calculator_expected must be boolean")
+        if "search_expected" in case and not isinstance(case["search_expected"], bool):
+            raise ValueError(f"case {case['id']}: search_expected must be boolean")
         if case["expected_verifier_verdict"] not in VERDICTS:
             raise ValueError(f"case {case['id']}: unsupported expected_verifier_verdict")
 
@@ -108,6 +110,10 @@ def evaluate(cases: list[dict[str, Any]], observations: list[dict[str, Any]]) ->
 
     answer_count = answer_correct = tool_count = tool_correct = 0
     tool_tp = tool_fp = tool_fn = 0
+    calculator_plan_count = calculator_plan_correct = 0
+    calculator_plan_tp = calculator_plan_fp = calculator_plan_fn = 0
+    search_route_count = search_route_correct = 0
+    search_tp = search_fp = search_fn = 0
     verifier_count = verifier_correct = false_accept_count = false_accept_denominator = 0
     response_count = response_valid = 0
     graph_invocations = 0
@@ -121,6 +127,10 @@ def evaluate(cases: list[dict[str, Any]], observations: list[dict[str, Any]]) ->
             "answer_observed": 0, "answer_correct": 0,
             "tool_observed": 0, "tool_correct": 0,
             "tool_tp": 0, "tool_fp": 0, "tool_fn": 0,
+            "calculator_plan_observed": 0, "calculator_plan_correct": 0,
+            "calculator_plan_tp": 0, "calculator_plan_fp": 0, "calculator_plan_fn": 0,
+            "search_observed": 0, "search_correct": 0,
+            "search_tp": 0, "search_fp": 0, "search_fn": 0,
             "verifier_observed": 0, "verifier_correct": 0,
             "false_accepts": 0, "non_correct_verifiers": 0,
             "response_observed": 0, "response_valid": 0,
@@ -151,6 +161,42 @@ def evaluate(cases: list[dict[str, Any]], observations: list[dict[str, Any]]) ->
             variant_stats["tool_tp"] += tp
             variant_stats["tool_fp"] += fp
             variant_stats["tool_fn"] += fn
+
+        planned_calculator = observation.get("planned_calculator")
+        if isinstance(planned_calculator, bool):
+            expected_calculator = case["calculator_expected"]
+            calculator_plan_count += 1
+            is_plan_correct = planned_calculator == expected_calculator
+            calculator_plan_correct += is_plan_correct
+            variant_stats["calculator_plan_observed"] += 1
+            variant_stats["calculator_plan_correct"] += is_plan_correct
+            tp = planned_calculator and expected_calculator
+            fp = planned_calculator and not expected_calculator
+            fn = not planned_calculator and expected_calculator
+            calculator_plan_tp += tp
+            calculator_plan_fp += fp
+            calculator_plan_fn += fn
+            variant_stats["calculator_plan_tp"] += tp
+            variant_stats["calculator_plan_fp"] += fp
+            variant_stats["calculator_plan_fn"] += fn
+
+        planned_search = observation.get("planned_search")
+        if "search_expected" in case and isinstance(planned_search, bool):
+            expected_search = case["search_expected"]
+            search_route_count += 1
+            is_search_correct = planned_search == expected_search
+            search_route_correct += is_search_correct
+            variant_stats["search_observed"] += 1
+            variant_stats["search_correct"] += is_search_correct
+            tp = planned_search and expected_search
+            fp = planned_search and not expected_search
+            fn = not planned_search and expected_search
+            search_tp += tp
+            search_fp += fp
+            search_fn += fn
+            variant_stats["search_tp"] += tp
+            variant_stats["search_fp"] += fp
+            variant_stats["search_fn"] += fn
 
         verdict = observation.get("verifier_verdict")
         if verdict in VERDICTS:
@@ -201,6 +247,12 @@ def evaluate(cases: list[dict[str, Any]], observations: list[dict[str, Any]]) ->
             "tool_cases_observed": stats["tool_observed"],
             "calculator_call_precision": ratio(stats["tool_tp"], stats["tool_tp"] + stats["tool_fp"]),
             "calculator_call_recall": ratio(stats["tool_tp"], stats["tool_tp"] + stats["tool_fn"]),
+            "calculator_plan_accuracy": ratio(stats["calculator_plan_correct"], stats["calculator_plan_observed"]),
+            "calculator_plan_cases_observed": stats["calculator_plan_observed"],
+            "search_route_accuracy": ratio(stats["search_correct"], stats["search_observed"]),
+            "search_route_cases_observed": stats["search_observed"],
+            "search_route_precision": ratio(stats["search_tp"], stats["search_tp"] + stats["search_fp"]),
+            "search_route_recall": ratio(stats["search_tp"], stats["search_tp"] + stats["search_fn"]),
             "verifier_expected_verdict_accuracy": ratio(stats["verifier_correct"], stats["verifier_observed"]),
             "verifier_cases_observed": stats["verifier_observed"],
             "false_acceptance_rate": ratio(stats["false_accepts"], stats["non_correct_verifiers"]),
@@ -230,6 +282,18 @@ def evaluate(cases: list[dict[str, Any]], observations: list[dict[str, Any]]) ->
                 "value": ratio(tool_correct, tool_count),
                 "necessary_call_precision": ratio(tool_tp, tool_tp + tool_fp),
                 "necessary_call_recall": ratio(tool_tp, tool_tp + tool_fn),
+            },
+            "calculator_plan_accuracy": {
+                "correct": calculator_plan_correct, "observed": calculator_plan_count,
+                "value": ratio(calculator_plan_correct, calculator_plan_count),
+                "precision": ratio(calculator_plan_tp, calculator_plan_tp + calculator_plan_fp),
+                "recall": ratio(calculator_plan_tp, calculator_plan_tp + calculator_plan_fn),
+            },
+            "search_route_accuracy": {
+                "correct": search_route_correct, "observed": search_route_count,
+                "value": ratio(search_route_correct, search_route_count),
+                "precision": ratio(search_tp, search_tp + search_fp),
+                "recall": ratio(search_tp, search_tp + search_fn),
             },
             "verifier_expected_verdict_accuracy": {
                 "correct": verifier_correct, "observed": verifier_count,

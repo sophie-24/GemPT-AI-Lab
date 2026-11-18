@@ -537,6 +537,7 @@ def run_analysis_logic(project_id, image_file, user_question):
             "process": [{"model": "System", "content": run_id, "step": "실행 ID"}],
             "debate_round": 0,
             "tool_calls_used": 0,
+            "calculator_checks": [],
         }, config=checkpoint_config(run_id))
 
     # Keep the established /api/solve response contract. The run ID is exposed
