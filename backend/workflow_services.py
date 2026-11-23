@@ -100,7 +100,6 @@ VERDICT_SCHEMA = {
         "answer": {"type": "string"},
     },
     "required": ["verdict", "critique", "answer"],
-    "additionalProperties": False,
 }
 
 CALCULATOR_TOOLS = [{
