@@ -1,157 +1,169 @@
 # GemPT-AI-Lab
 
-듀얼 LLM 기반 문제 풀이 검증 서비스 GemPT를 출발점으로, Agent 실행 흐름과 도구 사용, 평가 방법을 단계적으로 실험하는 프로젝트입니다.
+**GemPT를 출발점으로, 이미지 문제 풀이에 제한된 Agent 실행 흐름과 외부 도구를 연결하고 그 동작을 측정하는 실험 프로젝트입니다.**
 
-> **현재 상태:** 기존 Flask GemPT에 LangGraph 실행 경로, SQLite 체크포인트, 이미지 참조 저장소, 오프라인 평가 데이터와 집계기가 추가되었습니다. LangGraph 경로와 라이브 모델 성능은 검증 전이며, 아래에서 구현 파일과 실제 확인 결과를 구분합니다.
+GemPT의 GPT 풀이·Gemini 검증 구조를 이어받아 LangGraph 기반 분기, MCP 계산기, 실행 상태 저장, 기준선 비교용 평가기를 더했습니다. 핵심 목표는 “모델을 더 붙였다”가 아니라 **언제 도구를 쓰고, 결과를 어떻게 검증하며, 실패와 품질을 어떻게 관찰할지**를 명시하는 것입니다.
 
-## 프로젝트 소개
+> **현재 단계:** 핵심 경로와 컨테이너는 구현되어 있습니다. Compose의 API/MCP health 상태를 확인했습니다. `gemini-3.8-flash`는 간단한 일반 텍스트와 구조화 응답 모두 `503`을 반환했고, 같은 구조화 응답을 `gemini-3.6-flash`로 보내 성공을 확인해 로컬 Compose 설정을 3.6 Flash로 전환했습니다. 수정 후 전체 `/api/solve` 성공 여부, 정량 성능 비교, Kubernetes 클러스터 배포는 아직 확인 전입니다. 따라서 정확도·비용·속도 향상을 주장하지 않습니다.
 
-생성형 AI의 답변이 서로 다르거나 틀릴 때 학습자가 판단 근거를 확인하기 어렵다는 문제에서 시작했습니다. 기존 GemPT는 GPT를 문제 해결사(Solver), Gemini를 검증자(Verifier)로 나누고, 이미지 속 문제를 분석해 답안을 교차 검증합니다.
+## 한눈에 보기
 
-GemPT-AI-Lab의 고도화 방향은 기존 문제 풀이 흐름에 Agent 상태 관리, 제한된 도구 호출, 재현 가능한 평가 하네스를 더하는 것입니다. 목표는 정답을 보장한다고 주장하는 것이 아니라, 실행 단계와 도구 결과, 실패 원인을 확인하고 개선할 수 있는 구조를 만드는 것입니다.
+| 항목 | 설명 |
+|---|---|
+| 출발점 | 이미지 속 문제를 GPT가 풀고 Gemini가 검토하는 기존 GemPT |
+| 확장 이유 | 한 번의 요청 안에서 모델·도구가 어떤 순서로 동작했는지 추적하고, 분기와 실패를 통제하며, 개선 여부를 재현 가능하게 비교하기 위해 |
+| 주요 추가 | LangGraph, 제한된 MCP calculator, 조건부 검색, 실행 체크포인트, 고정 평가 사례와 집계기, Docker Compose 및 Kubernetes 매니페스트 |
+| API | Flask `POST /api/solve`; 기존 `winner`, `final_answer`, `scores`, `process` 응답 필드 유지 |
+| 검증 원칙 | 구현된 기능, 실제 관측한 동작, 아직 측정하지 않은 결과를 분리 |
 
-## 현재 구현된 기능
+## GemPT에서 GemPT-AI-Lab으로
 
-- 문제 이미지를 업로드하고 질문과 함께 풀이를 요청합니다.
-- GPT-4o 비전 계획기가 이미지·질문을 분류하고 검색과 calculator 사용 여부를 선택합니다.
-- 검색이 필요하다고 판단된 경우에만 SerpAPI를 최대 3회 호출합니다. 수학 계산 문제는 기본적으로 검색을 생략합니다.
-- GPT-4o Solver가 MCP calculator를 호출하면 결과를 대화 상태에 돌려받고, 그 값을 반영해 풀이를 이어갑니다. 계획상 계산기 사용이 필요하면 첫 호출에서 calculator 사용을 요구합니다.
-- Gemini가 최종 풀이를 구조화된 형식으로 검증합니다. Gemini 장애 시 검증 오류를 기록하고 추가 토론 호출은 중단합니다.
-- 의견이 다르면 최대 5회까지 반박·수정 과정을 진행합니다.
-- 최종 답변, 모델 점수, 단계별 처리 내용을 응답으로 반환합니다.
-- 프로젝트별 GPT·Gemini 점수를 로컬 JSON 파일에 저장합니다.
-- GPT가 선택한 산술 계산을 Flask의 MCP Client가 제한된 calculator 도구로 전달하고, 결과를 기존 풀이 흐름에 포함합니다. MCP 실행 이벤트는 `process`에 기록됩니다.
-- `POST /api/solve`는 LangGraph 실행 경로를 사용합니다. 기존 순차 실행 경로는 비교 기준선인 `run_analysis_logic_legacy`로 보존했습니다.
-- 그래프 실행은 `run_id`별 SQLite 체크포인트를 사용하고, 이미지 파일은 `/data/uploads`에 저장해 그래프 상태에는 `image_ref`만 둡니다.
-- 오프라인 평가 데이터와 집계기는 기준선·LangGraph 관측치를 구현별로 나눠 답 일치율, 검색·calculator 계획 정확도, 실제 도구 사용, Verifier 판정, 응답 구조, 지연과 실패를 요약합니다.
-- `GET /healthz`, API/MCP 컨테이너 및 Docker Compose 설정, 로컬 Kubernetes 매니페스트가 준비되어 있습니다. Compose 이미지 빌드와 두 컨테이너의 헬스 상태, API 컨테이너에서 MCP calculator까지의 호출은 확인했습니다.
+### 기존 GemPT
 
-Agent 계획기가 검색 필요 여부와 calculator 사용 필요 여부를 결정합니다. 검색 실행은 최대 3개 질의로 제한됩니다. 계산 결과는 Solver의 대화 상태로 전달되지만, 결과를 무시하지 않았는지와 답이 실제로 교정되었는지는 평가 데이터로 별도 측정해야 합니다. 실행은 Flask 요청 안에서 동기적으로 진행됩니다. 체크포인트는 저장되지만 실행 상태 조회·재개 API는 제공하지 않습니다. 평가 사례는 text-only이므로 이미지 인식 성능을 측정하지 않습니다.
+기존 GemPT는 이미지 문제를 받아 GPT가 풀이를 생성하고 Gemini가 답안을 검토하는 듀얼 LLM 문제 풀이 서비스입니다. 두 모델의 역할 분리는 유용했지만, 순차적인 호출 흐름만으로는 실행 상태, 조건부 도구 사용, 중간 실패, 기준선 대비 효과를 체계적으로 다루기 어려웠습니다.
 
-## 현재 처리 흐름
+### 확장 과정
 
-    문제 이미지와 질문
-      → Flask POST /api/solve
-      → GPT-4o Agent 계획 (주제·문제 유형·검색·계산기 분기)
-      → [검색 필요 시] 최대 3개 SerpAPI 검색
-      → GPT-4o 풀이 ↔ [계산 필요 시] MCP calculator 결과 반영
-      → Gemini 구조화 검증
-      → 최대 5회 토론 및 프로젝트 점수 갱신
-      → 답변, 점수, 단계별 process 반환
+1. **기존 경험과 API를 보존했습니다.** Flask와 `/api/solve` 계약을 유지해 기존 사용 흐름을 이어갑니다.
+2. **실행 단계를 명시했습니다.** LangGraph가 계획, 검색, 풀이, 도구 호출, 검증, 토론, 종료를 노드와 조건부 전이로 표현합니다.
+3. **필요할 때만 도구를 쓰도록 했습니다.** 계획기가 문제 유형을 분류하고 검색·계산기 필요 여부를 선택합니다. 검색은 최대 3개 질의, calculator는 요청당 최대 3회로 제한됩니다.
+4. **모델과 도구 사이에 통제 경계를 뒀습니다.** Solver가 calculator를 요청해도 Flask가 도구명과 인자를 검사한 뒤 MCP 서버를 호출합니다.
+5. **비교할 수 있는 발판을 마련했습니다.** 기존 순차 경로를 legacy 기준선으로 보존하고, 고정 사례와 관측 결과를 나눠 집계하는 평가기를 추가했습니다.
 
-## API
+## 처리 흐름
+
+```mermaid
+flowchart LR
+    U[이미지와 질문] --> API[Flask API<br/>입력 검증·run_id]
+    API --> PLAN[LangGraph Planner<br/>유형·검색·계산기 판단]
+    PLAN -->|검색 필요| SEARCH[SerpAPI<br/>최대 3개 질의]
+    PLAN -->|검색 불필요| SOLVER[GPT Solver]
+    SEARCH --> SOLVER
+    SOLVER -->|계산 도구 요청| GATE[Flask MCP Client<br/>allow-list·인자·횟수 검사]
+    GATE --> MCP[MCP Server<br/>calculator]
+    MCP -->|구조화 결과| SOLVER
+    SOLVER --> VERIFY[Gemini Verifier<br/>구조화 판정]
+    VERIFY -->|오류 발견·불확실| DEBATE[제한된 토론<br/>최대 5회]
+    VERIFY -->|정답 판정| END[종료·점수 저장]
+    DEBATE --> VERIFY
+    END --> OUT[winner·final_answer<br/>scores·process]
+```
+
+각 요청에는 `run_id`가 부여되고 단계별 이벤트가 `process`에 기록됩니다. LangGraph 체크포인트에는 이어서 실행하는 데 필요한 상태와 이미지 참조가 저장됩니다. 이미지 바이트는 그래프 상태에 직접 넣지 않고 `/data/uploads`의 파일로 보관하며, 체크포인터는 SQLite를 사용합니다. 체크포인트 저장은 구현되어 있지만, 외부 실행 상태 조회·취소·재개 API까지 제공하는 것은 아닙니다.
+
+## 무엇이 달라졌나
+
+| 영역 | 기존 GemPT에서 이어받은 것 | GemPT-AI-Lab에서 추가한 것 | 기대 효과와 현재 한계 |
+|---|---|---|---|
+| 모델 역할 | GPT 풀이, Gemini 검증 | 계획기·Solver·Verifier 작업을 명시 | 실행 책임이 분명해짐. 모델이 항상 옳다는 보장은 없음 |
+| 흐름 제어 | 순차적인 풀이·검증 | LangGraph 노드, 상태, 조건부 분기와 종료 경로 | 어느 단계에서 실패했는지 추적 가능. 성능 개선은 별도 측정 필요 |
+| 도구 | 모델 응답에 의존 | MCP calculator, allow-list·입력 검증·시간/호출 제한 | 계산 실행을 통제하고 결과를 풀이 흐름에 전달. 결과 반영률은 아직 측정 전 |
+| 검색 | 문제와 무관하게 검색될 수 있는 구조 | 계획기가 선택할 때만 SerpAPI 검색 | 불필요한 검색 호출을 줄일 수 있는 구조. 실제 절감량은 미측정 |
+| 상태와 입력 | 요청 중 메모리 중심 처리 | `run_id`, SQLite 체크포인트, 파일 기반 이미지 참조 | 추적과 상태 보관을 개선. 장애 후 안전한 재개 정책은 제한적 |
+| 평가 | 개별 답변 확인 | legacy/LangGraph 실행 기록과 고정 사례 집계기 | 같은 사례로 비교할 기반. 현재 사례 수와 입력 형식으로는 일반 성능 결론 불가 |
+| 실행 환경 | Flask 애플리케이션 | Compose 서비스 분리와 Kubernetes 매니페스트 | 로컬 통합·배포 학습 기반. Kubernetes 실제 배포는 미확인 |
+
+## 기술 선택과 트레이드오프
+
+| 기술 | 맡은 역할 | 선택 이유 | 감수한 점 / 다른 선택과 비교 |
+|---|---|---|---|
+| **Flask** | 기존 HTTP API와 업로드 처리 | 기존 GemPT를 유지하며 Agent 흐름을 점진적으로 붙이기 쉬움 | 비동기·타입 중심 API가 핵심이면 FastAPI가 대안이지만, 전면 이전은 범위와 회귀 위험을 키우므로 하지 않음 |
+| **LangGraph** | 상태가 있는 실행 그래프와 조건부 전이 | 계획→검색/생략→풀이→도구→검증→토론처럼 반복·분기를 코드 구조로 드러냄 | 단순 직선 호출에는 과할 수 있고 그래프 상태 설계가 추가됨. 자유 자율성 대신 제한된 상태 전이를 택함 |
+| **MCP** | 계산 도구 서버와 클라이언트 사이의 표준 인터페이스 | 도구 기능을 모델 제공자·API 코드와 분리하고, 허용된 도구만 호출하도록 경계를 둘 수 있음 | 계산 하나만 보면 직접 함수 호출이 더 단순함. 별도 프로세스와 프로토콜 운영 비용을 감수하며 확장 가능한 도구 연결을 실험 |
+| **GPT·Gemini** | GPT는 계획·풀이, Gemini는 독립 검증 | 생성과 검토를 분리해 단일 응답보다 오류를 발견할 기회를 마련 | 두 번 이상의 모델 호출로 지연·비용·외부 API 의존성이 증가. 모델 간 합의도 정답 증거는 아님 |
+| **SerpAPI** | 검색이 선택된 사례의 외부 정보 수집 | 최신·외부 사실이 필요한 문제에 선택적으로 근거를 제공 | 외부 검색은 잡음·비용·지연·프롬프트 인젝션 위험이 있어 필요할 때만 제한적으로 사용 |
+| **SQLite 체크포인터 + 파일 저장소** | 실행 상태와 이미지 참조 보관 | MVP에서 별도 데이터베이스 없이 재현 가능한 상태 기록과 큰 입력의 분리를 구현 | 로컬 단일 인스턴스에 적합. 다중 복제본·운영 고가용성에는 공유 DB/객체 저장소가 필요 |
+| **Docker Compose** | API와 MCP의 로컬 통합 | 로컬에서 서비스 주소·의존성·헬스체크를 재현 | 클러스터 오케스트레이션은 제공하지 않으므로 Kubernetes와 역할을 분리 |
+| **Kubernetes** | API/MCP 배포 리소스와 저장 볼륨 선언 | Deployment·Service·PVC 등 운영 기본 개념을 검증할 배포 대상을 제공 | 매니페스트가 있다는 것과 실제 클러스터 배포 성공은 다름. 현재 클러스터 적용은 확인되지 않음 |
+
+## 성능은 어떻게 평가할까?
+
+이 프로젝트의 성능은 “모델을 추가했으니 좋아졌다”로 판단하지 않습니다. `legacy`와 `langgraph`에 **같은 사례·모델·프롬프트 조건**을 주고 다음을 비교해야 합니다.
+
+- **풀이 품질:** 기준 답과의 일치율, 설명 루브릭 점수, 검증 후 정답률
+- **계획 품질:** 검색과 calculator 각각의 precision·recall·F1 및 불필요 호출률
+- **도구 효과:** 도구 결과 성공률, Solver의 결과 반영 여부, calculator 허용/비허용 조건의 정답률 차이
+- **운영 효율:** 요청 전체 지연의 p50/p95, 모델·검색·도구 호출 횟수, 토큰과 요청별 비용, 오류율
+- **재현성:** 모델·프롬프트·데이터셋 버전, 실행 횟수, 분자/분모, 실패 사례 기록
+
+현재 평가 데이터는 소규모 text-only 시작 세트입니다. 실제 이미지 인식, 검증 후 정확도, 도구에 의한 답 교정률, 비용·단계별 지연을 주장하려면 라벨이 있는 실제 이미지 사례, 노드별 계측, 도구 전후 답 기록이 더 필요합니다. 평가 설계와 현재 지표의 한계는 [평가 안내](docs/evaluation.md)와 [검증 실행서](docs/validation-runbook.md)를 참고하세요.
+
+## 구현 및 검증 현황
+
+### 구현된 항목
+
+- 기존 Flask API와 응답 필드를 유지하면서 LangGraph 경로를 연결했습니다.
+- 문제 유형에 따른 조건부 검색·calculator 계획과 제한을 추가했습니다.
+- MCP calculator 서버, Flask MCP Client, 구조화 도구 결과 경로를 구현했습니다.
+- `run_id`, 단계별 `process`, SQLite 체크포인트, 이미지 파일 참조 저장을 추가했습니다.
+- legacy와 LangGraph 관측치를 다루는 평가 데이터·실행기·집계기를 추가했습니다.
+- API와 MCP Docker 이미지, Compose 설정, Kubernetes 매니페스트를 준비했습니다.
+
+### 실제 확인된 항목과 남은 검증
+
+- **확인:** API와 MCP 이미지 빌드, 두 컨테이너의 Compose health 상태, API 컨테이너의 Flask 시작과 `/healthz` 200 응답.
+- **확인:** 실제 `/api/solve` 실행에서 planner와 GPT 풀이까지 진행됐지만, Gemini의 구조화 검증 요청이 `400 INVALID_ARGUMENT`로 실패했습니다. 오류 원인은 Gemini가 스키마의 `additionalProperties`를 지원하지 않은 것이었습니다.
+- **수정 및 단위 smoke 확인:** 검증 스키마에서 `additionalProperties`를 제거했습니다. 이후 같은 컨테이너에서 `gemini-3.8-flash`는 일반 텍스트·구조화 요청 모두 `503`을 반환했고, `gemini-3.6-flash` 구조화 요청은 성공했습니다. `.env`의 Compose 모델 설정을 3.6 Flash로 바꾸고 API 컨테이너에 적용했습니다.
+- **전체 경로 재검증 필요:** 모델 설정 변경 후 실제 `/api/solve`가 Gemini 검증까지 성공하는지는 아직 확인하지 않았습니다.
+- **미확인:** 위 실제 `/api/solve` 사례는 planner가 calculator를 선택하지 않아 MCP 도구 경로를 검증하지 않았습니다. 별도의 calculator 호출 성공은 API 전체 경로 성공과 구분합니다.
+- **미확인:** Kubernetes 매니페스트 적용, Pod readiness, API→MCP 호출, PVC 재시작 후 데이터 보존.
+- **미측정:** legacy 대비 정확도·비용·지연 개선. 현재 수치로 성능 향상을 주장하지 않습니다.
+
+README와 상태 보고는 설정 파일이 존재하는 사실과 실제 실행을 관측한 사실을 구분합니다. 배포 절차는 [Kubernetes 안내](docs/kubernetes.md), 전체 기술 맥락은 [프로젝트 방향·면접 안내](docs/project-direction-and-interview-guide.md)를 참고하세요.
+
+## 실행 방법
+
+### Docker Compose
+
+저장소 루트의 `.env`에 다음 변수를 설정합니다. 실제 키는 커밋하지 마세요.
+
+```dotenv
+OPENAI_API_KEY=...
+GOOGLE_API_KEY=...
+SERPAPI_API_KEY=...
+GEMINI_MODEL_NAME=gemini-3.6-flash
+```
+
+API와 MCP를 빌드하고 실행합니다.
+
+```powershell
+docker compose up -d --build
+docker compose ps
+```
+
+컨테이너가 `healthy`가 된 뒤 health endpoint를 확인합니다. 첫 시작은 이미지 빌드와 Flask 초기화 때문에 시간이 걸릴 수 있으므로 `Started` 직후보다는 `healthy` 상태를 확인한 다음 요청하세요.
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:5000/healthz
+```
+
+이미지 문제 요청 예시는 [검증 실행서](docs/validation-runbook.md)에 있습니다. Compose 서비스와 볼륨에 대한 자세한 설명은 [Kubernetes/로컬 실행 안내](docs/kubernetes.md)를 참고하세요.
+
+### API 계약
 
 | Method | Endpoint | 설명 |
-| --- | --- | --- |
-| GET | / | 웹 애플리케이션 제공 |
-| GET | /healthz | API 상태 확인 |
-| POST | /api/solve | multipart/form-data로 image, 선택 질문 question, 선택 project_id를 받아 풀이 |
-| GET | /api/scores/{project_id} | 프로젝트별 모델 점수 조회 |
+|---|---|---|
+| `GET` | `/` | 웹 프론트엔드 |
+| `GET` | `/healthz` | API readiness 확인 |
+| `POST` | `/api/solve` | `multipart/form-data`: 필수 `image`, 선택 `question`, `project_id` |
+| `GET` | `/api/scores/{project_id}` | 프로젝트별 GPT·Gemini 점수 |
 
-POST /api/solve는 현재 winner, final_answer, scores, process 필드를 반환합니다. 자세한 계약은 [기존 API 명세서](docs/api_spec.md)를 참고하세요.
+`POST /api/solve`는 `winner`, `final_answer`, `scores`, `process`를 반환합니다. 상세 요청·응답 계약은 [API 명세](docs/api_spec.md)에 있습니다.
 
-## 기술 스택
+## 범위와 다음 단계
 
-- **Backend:** Python, Flask, Pillow
-- **LLM:** OpenAI API (GPT-4o), Google Gemini API (Gemini 2.5 Pro)
-- **검색:** SerpAPI
-- **Frontend:** React, Tailwind CSS, MathJax
-- **현재 저장:** 프로젝트 점수용 로컬 JSON 파일
+**MVP의 초점:** 제한된 문제 풀이 Agent, 하나의 MCP calculator, 추적 가능한 실행, 고정 사례 평가, 로컬 Compose 통합, Kubernetes 배포 정의입니다.
 
-## MCP·LangGraph·Kubernetes 실행 구조
+**현재 범위 밖:** 범용 자율 에이전트, 사용자 승인 없는 쓰기 도구, 운영급 다중 복제본·고가용성, 자동 자기 개선, 실사용자 데이터 기반 성능 주장입니다.
 
-현재 구현은 기존 Flask API, LangGraph 실행 흐름, 별도 MCP 계산기 서비스와 컨테이너·Kubernetes 리소스를 연결하는 구조입니다. Compose 경로는 일부 확인했으며, LangGraph 전체 실행과 Kubernetes 배포 상태는 아래 제한 사항에 구분해 기록합니다.
+다음 검증 순서는 ① 스키마 수정 후 실제 `/api/solve` 성공 확인, ② calculator 필요 이미지에서 planner 선택과 API→MCP 결과 반영 확인, ③ 라벨 사례 확장과 legacy 비교, ④ 사용 가능한 Kubernetes context에서 readiness·서비스 연결·PVC 보존 관찰입니다.
 
-### 목표 구조
+## 문서
 
-    사용자
-      → Flask GemPT API
-      → LLM의 도구 호출 판단
-      → MCP Client
-      → MCP Server (계산 도구)
-      → 도구 결과를 LLM 검증 흐름에 반영
-      → 답변과 실행 이벤트 반환
-
-Flask 애플리케이션은 MCP Client 역할을 합니다. LLM이 계산 도구 호출을 요청하면 서버가 허용된 도구와 입력을 확인하고 MCP Server에 전달합니다. LLM이 MCP 서버에 직접 연결되는 구조는 아닙니다.
-
-### 구현 범위와 검증 상태
-
-1. **MCP 도구:** 별도 MCP Server의 제한된 calculator를 Flask MCP Client가 호출합니다.
-2. **안전한 호출:** 허용 목록·입력 검사·시간 제한·호출 수 제한·구조화 결과를 적용합니다.
-3. **LangGraph:** 계획·조건부 검색·풀이·MCP 도구 실행·검증·토론·종료 단계를 그래프 상태와 분기로 관리합니다.
-4. **영속성:** `run_id` 기반 SQLite 체크포인트와 별도 이미지 파일 저장을 사용합니다.
-5. **평가 준비:** 고정 text-only 사례와 `legacy`/`langgraph` 관측치를 나눠 집계하는 오프라인 평가기를 둡니다.
-6. **컨테이너·Kubernetes:** Compose 파일과 Kubernetes Deployment·Service·PVC 등 매니페스트를 제공합니다.
-7. **API 호환성:** `/api/solve`의 `winner`, `final_answer`, `scores`, `process` 필드를 유지합니다.
-
-현재 점수 파일이 로컬 JSON이므로 MVP에서는 API 파드 한 개로 실행하고 데이터 파일 보존 방식을 명시합니다. 여러 API 파드로 확장하거나 운영 수준의 가용성을 주장하지 않습니다.
-
-### 확인된 실행 결과와 남은 확인
-
-- Compose 이미지 빌드, API/MCP health 상태, 기존 Flask MCP Client의 calculator 호출은 관측했습니다.
-- LangGraph를 통한 실제 `/api/solve` 요청과 API 키가 필요한 평가 실행은 아직 관측하지 않았습니다.
-- Kubernetes 매니페스트는 준비됐지만, 사용 가능한 kubectl context가 없어 클러스터 적용·Pod 준비 상태·로그는 관측하지 않았습니다.
-
-### MVP 이후 확장
-
-- Agent 실행 상태와 대화별 지속 저장
-- 평가 하네스와 프롬프트·도구 설명 버전 비교
-- OpenTelemetry 기반 trace와 Langfuse 또는 Phoenix 시각화
-- 이미지 기반 평가 데이터와 풀이 설명 루브릭 채점
-- 동시성 증가 시 JSON/SQLite 파일 저장소를 공유 DB로 교체
-- GitHub Actions에서 품질 검사와 컨테이너 빌드 자동화
-
-평가 사례는 현재 텍스트 입력만 포함하므로, 결과는 이미지 인식 성능을 나타내지 않습니다. 오프라인 fixture도 지표 집계 형식 예시이며 모델 품질 측정값이 아닙니다. 점수 저장은 로컬 JSON이며 API 복제본은 하나로 제한합니다. 실행·비교 세부사항은 [평가 안내](docs/evaluation.md), Kubernetes 절차와 관측 제한은 [Kubernetes 안내](docs/kubernetes.md)를 참고하세요.
-## 로컬 실행
-
-### 준비물
-
-- Python 가상환경
-- OpenAI API 키와 Google Gemini API 키
-- 검색 기능을 사용할 경우 SerpAPI 키
-
-### 설치
-
-    git clone https://github.com/sophie-24/GemPT-AI-Lab.git
-    cd GemPT-AI-Lab/backend
-    python -m venv .venv
-
-Windows PowerShell:
-
-    .\.venv\Scripts\Activate.ps1
-
-macOS/Linux:
-
-    source .venv/bin/activate
-
-의존성을 설치합니다.
-
-    pip install -r requirements.txt
-
-backend/.env.example을 backend/.env로 복사하고 키를 입력합니다. 현재 예제 파일에는 OpenAI와 Google 키가 있습니다. 검색 기능을 사용하려면 SERPAPI_API_KEY도 backend/.env에 추가하세요.
-
-    OPENAI_API_KEY=your_openai_key
-    GOOGLE_API_KEY=your_google_key
-    SERPAPI_API_KEY=your_serpapi_key
-
-백엔드 디렉터리에서 Flask 개발 서버를 실행합니다.
-
-    flask run
-
-기본 주소는 http://127.0.0.1:5000 입니다.
-
-로컬 Compose 통합은 저장소 루트에서 `docker compose build` 후 `docker compose up`으로 실행합니다. `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `SERPAPI_API_KEY`는 환경 변수로 전달하고, 점수 파일은 `PROJECT_DB_FILE=/data/project_db.json`으로 설정된 named volume에 저장됩니다. 점수 JSON 파일을 사용하는 동안 API는 1개 인스턴스로 운영해야 합니다.
-
-## 데이터 및 제한 사항
-
-- 실제 API 키가 들어 있는 .env 파일은 커밋하지 마세요.
-- 현재 점수 저장 파일은 로컬 개발용이며 다중 인스턴스 운영용 저장소가 아닙니다.
-- LLM 응답이나 모델 간 합의는 정답을 보장하지 않습니다. 평가 결과와 도구의 적용 범위를 함께 확인해야 합니다.
-- 프로젝트의 현재 API와 구조는 고도화 과정에서 변경될 수 있으며, 변경 시 이 문서와 API 명세를 함께 갱신합니다.
-
-## 개발 원칙
-
-- 기존 동작과 API 계약을 확인한 뒤 작은 단위로 변경합니다.
-- 모델 호출, 도구 실행, 상태 전이, 사용자 응답을 구분해 기록합니다.
-- 허용된 도구만 실행하고 입력 스키마, 횟수, 시간 제한을 적용합니다.
-- 측정 전에는 정확도 향상이나 운영 성과를 주장하지 않습니다.
+- [조건부 Agent 검증 실행서](docs/validation-runbook.md)
+- [평가 설계와 지표](docs/evaluation.md)
+- [API 명세](docs/api_spec.md)
+- [MCP/Kubernetes 구현 워크플로](docs/agent-workflow.md)
+- [Kubernetes 실행 안내](docs/kubernetes.md)
+- [Agent 개념·면접 준비](docs/ai-agent-interview-concepts.md)
+- [프로젝트 방향 및 면접 안내](docs/project-direction-and-interview-guide.md)
